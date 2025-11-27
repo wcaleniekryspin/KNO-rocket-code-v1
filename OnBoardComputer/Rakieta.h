@@ -6,7 +6,7 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <SoftwareSerial.h>  /// zamienić na HardwareSerial
-// #include <LoRaWan_APP.h>  /// odkomentować jak przejdę na stm32
+#include <RadioLib.h>
 #include <TinyGPSPlus.h>
 #include <Adafruit_LSM6DS.h>    // LSM6DS3 via SPI
 #include <Adafruit_BMP3XX.h>    // BMP388 via SPI
@@ -14,9 +14,12 @@
 #include <Adafruit_MAX31855.h>  // MAX31855 via SPI
 #include <Adafruit_SPIFlash.h>
 
-
 #include "config.h"
 #include "BitStorage.h"
+
+// Musi tu być do oprawnego działania modułu RadioLib
+inline volatile bool operationDone = false;
+inline void setOperationFlag(void) { operationDone = true; }
 
 
 class Rakieta
@@ -115,6 +118,8 @@ class Rakieta
       } max;
     } data;
 
+    bool ledState = false;
+
     uint16_t error = 0;
     uint32_t packet = 0;
 
@@ -127,13 +132,18 @@ class Rakieta
     uint32_t touchdownStartTime = 0;
 
     BitStorage message;
+    SX1262 radio;
+    
+    bool transmitting = false;
+    bool messagePending = false;
+    String pendingMessage = "";
+    String receivedMessage = "";
     
     bool sdReady = false, flashReady = false;
     uint32_t fileNumber = 0;
     String currentFileName;
     File32 SDDataFile;
     File32 flashDataFile;
-
     SdFat sd;
     /// SPIClass flashSPI(HSPI);
     /// Adafruit_FlashTransport_SPI flashTransport(FLASH_CS, &flashSPI);
@@ -149,6 +159,7 @@ class Rakieta
     Adafruit_MAX31855 max3;
 
     void prepareMsg();
+    void startListening();
 
     bool flashInit();
     bool SDInit();
@@ -166,14 +177,14 @@ class Rakieta
 
     void init();
 
-    void radioConfig() {};
-    void onTxDone(void) {};
-    void onTxTimeout(void) {};
-    void onRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {};
-    
+    bool initializeRadio();
+    void printRadioStatus();
+    void onRx();
+    void transmit(String message);
+
     bool writeRocketData();
-    
     void sendMsg();
+
     void watchdog();
     void setOffsets();
     void handleGps();

@@ -20,9 +20,23 @@
 
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 
+// NEW LORA
+#define NSS   10
+#define DIO1  2
+#define NRST  3
+#define BUSY  9
+
+#define FREQUENCY              868.0    // MHz
+#define BANDWIDTH              125.0    // kHz
+#define SF                     9        // 7-12
+#define CODING_RATE            5        // 5-8
+#define POWER                  21       // dBm (do 21-22 dBm)
+#define preambleLength         15       // 6-30 symboli im dłuższe tym lepsze synchro i zasięg? ale wolniejsza transmisja
+
+
 // LORA / TIMING
 #define RF_FREQUENCY                        868000000 // Hz
-#define TX_OUTPUT_POWER                     5         // dBm
+#define TX_OUTPUT_POWER                     20        // dBm
 #define LORA_BANDWIDTH                      0         // [0: 125 kHz,
                                                   //  1: 250 kHz,
                                                   //  2: 500 kHz,

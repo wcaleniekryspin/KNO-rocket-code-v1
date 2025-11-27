@@ -14,7 +14,7 @@ void BitStorage::setBit(uint16_t bitIndex, bool val)
   else message[byteIdx] &= ~(1u << currentBit);
 }
 
-void BitStorage::add(uint32_t value, uint16_t pos, int8_t bitSize, bool isSigned = false)
+void BitStorage::add(uint32_t value, uint16_t pos, int8_t bitSize, bool isSigned)
 {
   if (pos + bitSize > ARRAY_SIZE * 8)
   {

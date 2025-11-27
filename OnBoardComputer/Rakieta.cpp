@@ -2,11 +2,11 @@
 
 /***************************************************
 TO DO:
- - dodać LoRa (onTx, onRx, onTxTimeout, sendMsg)
  - dodać mnożniki do wartości w funkcji prepareMsg()
  - zrobić parashuteOpen()
  - dodać zmianę parametrów (buzzer, msgDelay i inne) w funkcji updateStatus()
 
+ -- dodać ustawianie error dla LoRa
  -- odkomentować servo dla esp32/stm32
  -- zastanowić się czy wychodzić z funkcji handleSensor() jeśli jest błąd na sensorze
 
@@ -14,7 +14,9 @@ TO DO:
 
 ***************************************************/
 
-Rakieta::Rakieta(): status(State::debug), gpsSerial(3, 4), lsm(), bmp(), adxl((uint8_t)255, &SPI), max3((uint8_t)255, &SPI), flashTransport(FLASH_CS, &SPI), flash(&flashTransport)
+Rakieta::Rakieta(): status(State::debug), gpsSerial(3, 4), lsm(), bmp(), 
+  adxl((uint8_t)255, &SPI), max3((uint8_t)255, &SPI), flashTransport(FLASH_CS, &SPI),
+  flash(&flashTransport), radio(new Module(NSS, DIO1, NRST, BUSY))
 {
   error |= LORA_ERROR | LSM_ERROR | BMP_ERROR | ADXL_ERROR | MAX_ERROR |
            SD_ERROR | SD_FILE_ERROR | FLASH_ERROR | FLASH_FILE_ERROR;
@@ -57,6 +59,127 @@ void Rakieta::init()
   // Move servo to position 0
   setupServo();
   servoDeg(0);
+}
+
+bool Rakieta::initializeRadio()
+{
+  debugln("Inicjalizacja SX1262...");
+  int state = radio.begin(FREQUENCY);
+  if (state != RADIOLIB_ERR_NONE)
+  {
+    debug("Błąd: ");
+    debugln(state);
+    return false;
+  }
+  
+  // Konfiguracja parametrów LoRa
+  state = radio.setBandwidth(BANDWIDTH);
+  state |= radio.setSpreadingFactor(SF);
+  state |= radio.setCodingRate(CODING_RATE);
+  state |= radio.setOutputPower(POWER);
+  state |= radio.setPreambleLength(preambleLength);
+  
+  if (state != RADIOLIB_ERR_NONE)
+  {
+    debug("Błąd konfiguracji: ");
+    debugln(state);
+    return false;
+  }
+
+  radio.setDio1Action(setOperationFlag);
+  printRadioStatus();
+  debugln(F("Radio gotowe - nasłuchiwanie..."));
+  return true;
+}
+
+void Rakieta::startListening()
+{
+  int state = radio.startReceive();
+  if (state != RADIOLIB_ERR_NONE)
+  {
+    debug(F("Błąd rozpoczęcia nasłuchiwania: "));
+    debugln(state);
+  }
+  transmitting = false;
+}
+
+void Rakieta::onRx()
+{
+  String str;
+  int state = radio.readData(str);
+  
+  if (state == RADIOLIB_ERR_NONE)
+  {
+    debugln(F("\n== ODEBRANO WIADOMOŚĆ =="));
+    debug(F("Dane: "));
+    debugln(str);
+    debug(F("RSSI: "));
+    debug(radio.getRSSI());
+    debugln(F(" dBm"));
+    debug(F("SNR: "));
+    debug(radio.getSNR());
+    debugln(F(" dB"));
+    debugln(F("========\n"));
+  }
+  else
+  {
+    debug(F("Błąd odczytu danych: "));
+    debugln(state);
+  }
+}
+
+void Rakieta::printRadioStatus()
+{
+  debugln(F("\n=== STATUS RADIA ==="));
+  debug(F("Częstotliwość: "));
+  debug(FREQUENCY);
+  debugln(F(" MHz"));
+  debug(F("Moc: "));
+  debug(POWER);
+  debugln(F(" dBm"));
+  debug(F("SF: "));
+  debugln(SF);
+  debug(F("BW: "));
+  debug(BANDWIDTH);
+  debugln(F(" kHz"));
+  debug(F("CR: 4/"));
+  debugln(CODING_RATE);
+  debugln(F("===================\n"));
+}
+
+void Rakieta::transmit(String message)
+{
+  if (operationDone)
+  {
+    operationDone = false;
+    if (message.length() > 255)
+    {
+      debugln(F("Błąd: Wiadomość zbyt długa"));
+      return;
+    }
+
+    if (transmitting)
+    {
+      pendingMessage = message;
+      messagePending = true;
+      debugln(F("Transmisja w toku - wiadomość zapisana w buforze"));
+      return;
+    }
+    
+    debug(F("Wysyłanie: "));
+    debugln(message);
+    
+    transmitting = true;
+    int state = radio.startTransmit(message);
+    
+    if (state != RADIOLIB_ERR_NONE)
+    {
+      debug(F("Błąd rozpoczęcia transmisji: "));
+      debugln(state);
+      transmitting = false;
+      startListening();
+    }
+  }
 }
 
 bool Rakieta::flashInit()
@@ -345,11 +468,15 @@ bool Rakieta::writeRocketData()
 void Rakieta::watchdog()
 {
   lastWatchdogTime = millis();
-  /// odkomentować
+  /// uaktualnić
   if (error & LORA_ERROR)
   {
-    radioConfig();
-    // Radio.Rx(0);
+    while (!initializeRadio())
+    {
+      debugln(F("Błąd inicjalizacji radia!"));
+      delay(100);
+    }
+    startListening();
     delay(10);
   }
 
@@ -496,29 +623,26 @@ void Rakieta::sendMsg()
 {
   packet++;
   prepareMsg();
-  /*
-    uint8_t *txPacket = message.data();
+  uint8_t *txPacket = message.data();
 
-    debugln("\n\nSending: ");
+  debugln("\n\nSending: ");
 
-    for (int i=0; i<ARRAY_SIZE; i++)
-      debugHex(txPacket[i]);
-    debugln("");
+  for (int i=0; i<ARRAY_SIZE; i++)
+    debugHex(txPacket[i]);
+  debugln("");
 
-    for (int i=0; i<ARRAY_SIZE; i++)
-      for (int j=7; j>=0; --j)
-        debug((txPacket[i] >> j) & 1);
+  for (int i=0; i<ARRAY_SIZE; i++)
+    for (int j=7; j>=0; --j)
+      debug((txPacket[i] >> j) & 1);
 
-    debugln("\nEnd of the message.\n\n");
+  debugln("\nEnd of the message.\n\n");
 
-    Radio.Send((uint8_t*)txPacket, (uint8_t)ARRAY_SIZE);
-    if (status == State::debug || status == State::dynamometer)
-    {
-      ledState = !ledState;
-      digitalWrite(LED_1, ledState);
-    }
-    debugln("Sending DONE");
-  */
+  transmit(String(*txPacket));
+  messagePending = false;
+  ledState = !ledState;
+  digitalWrite(LED_1, ledState);
+
+  debugln("Sending DONE");
 }
 
 void Rakieta::setOffsets()

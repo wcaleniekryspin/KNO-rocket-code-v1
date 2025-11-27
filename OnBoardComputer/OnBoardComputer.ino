@@ -2,8 +2,8 @@
 
 Rakieta rakieta;
 
-void setup() {
-  // put your setup code here, to run once:
+void setup()
+{
   debugInit(9600);
   delay(50);
   debugln(F("Hello. Rocket setup"));
@@ -15,8 +15,8 @@ void setup() {
   rakieta.init();
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
+void loop()
+{
   rakieta.handleGps();
   rakieta.handleLsm6();
   rakieta.handleAdxl();
