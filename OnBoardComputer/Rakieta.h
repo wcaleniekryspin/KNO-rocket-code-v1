@@ -13,6 +13,7 @@
 #include <Adafruit_ADXL343.h>   // ADXL375 via SPI
 #include <Adafruit_MAX31855.h>  // MAX31855 via SPI
 #include <Adafruit_SPIFlash.h>
+#include <Servo.h>
 
 #include "config.h"
 #include "BitStorage.h"
@@ -26,13 +27,13 @@ class Rakieta
 {
   private:
     enum class State {
-      debug,  // debug purpose only
-      idle,  // waiting in the pad
-      ready,  // waiting for start
-      burn,  // engine run
-      rising,  // engine cut-off
-      apogee,  // waiting for the parashute
-      falling,  // parashute open
+      debug,     // debug purpose only
+      idle,      // waiting in the pad
+      ready,     // waiting for start
+      burn,      // engine run
+      rising,    // engine cut-off
+      apogee,    // waiting for the parashute
+      falling,   // parashute open
       touchdown  // grounded
     } status;
 
@@ -118,18 +119,39 @@ class Rakieta
       } max;
     } data;
 
+    bool handleSensors = true;
+
     bool ledState = false;
+    bool buzzerEnabled = true;
+    bool buzzerState = false;
 
     uint16_t error = 0;
     uint32_t packet = 0;
 
+    const uint32_t watchdogInterval = WATCHDOG_INTERVAL;
+    uint32_t handleSensorsInterval = SEND_INTERVAL_DEBUG / 4;
+    uint32_t dataSaveInterval = SEND_INTERVAL_DEBUG / 4;
+    uint32_t msgSendInterval = SEND_INTERVAL_DEBUG;
+    uint32_t buzzerInterval = BUZZER_INTERVAL_DEBUG;
+
     uint32_t lastWatchdogTime = 0;
+    uint32_t lastHandleSensorsTime = 0;
+    uint32_t lastDataSaveTime = 0;
+    uint32_t lastMsgSendTime = 0;
+    uint32_t lastBuzzerTime = 0;
 
     uint32_t startTime = 0;
     uint32_t afterburnStartTime = 0;
     uint32_t afterRisingStartTime = 0;
     uint32_t apogeeStartTime = 0;
     uint32_t touchdownStartTime = 0;
+    
+    bool solenoidActive = false;
+    uint32_t solenoidStartTime = 0;
+    uint8_t solenoidPulses = 0;
+    uint32_t solenoidPulseDuration = SOLENOID_PULSE;
+    uint32_t solenoidPulseInterval = SOLENOID_PULSE;
+    uint8_t servoAngle = 5;
 
     BitStorage message;
     SX1262 radio;
@@ -151,49 +173,52 @@ class Rakieta
     Adafruit_SPIFlash flash;
     FatVolume fatfs;
 
+    Servo myServo;
     TinyGPSPlus gps;
     SoftwareSerial gpsSerial;
     Adafruit_LSM6DS lsm;
     Adafruit_BMP3XX bmp;
     Adafruit_ADXL343 adxl;
     Adafruit_MAX31855 max3;
+  
+    bool initializeRadio();  // Inicjalizuje moduł radiowy LoRa z konfiguracją parametrów
+    void printRadioStatus();  // Wyświetla aktualną konfigurację i status radia
+    void checkRadio();  // Obsługuje odebrane wiadomości LoRa (callback)
+    void transmit(String message);  // Wysyła wiadomość przez LoRa z obsługą buforowania
+    void prepareMsg();  // Przygotowuje dane do transmisji przez LoRa (pakowanie w strukturę binarną)
+    void startListening();  // Rozpoczyna nasłuchiwanie na kanale LoRa
+    void handleCommand(String);
+    void sendMsg();  // Wysyła przygotowaną wiadomość przez LoRa i zwiększa numer pakietu
+    void sendGpsOffset();
 
-    void prepareMsg();
-    void startListening();
+    bool flashInit();  // Inicjalizuje pamięć flash SPI z systemem plików FAT
+    bool SDInit();  // Inicjalizuje kartę SD i tworzy system plików
+    bool flashFindNextFileNumber();  // Znajduje kolejny dostępny numer pliku w pamięci flash
+    bool flashOpenNewFile();  // Otwiera nowy plik CSV w pamięci flash do zapisu danych
+    bool flashWriteData(const String& data);  // Zapisuje dane do pliku w pamięci flash
+    bool SDOpenNewFile();  // Otwiera nowy plik CSV na karcie SD do zapisu danych
+    bool SDWriteData(const String& data);  // Zapisuje dane do pliku na karcie SD
+    bool writeRocketData();  // Zapisuje wszystkie dane z czujników do plików CSV
 
-    bool flashInit();
-    bool SDInit();
-    bool flashFindNextFileNumber();
-    bool flashOpenNewFile();
-    bool flashWriteData(const String& data);
-    bool SDOpenNewFile();
-    bool SDWriteData(const String& data);
-    
-    void parashuteOpen();
-    void setupServo();
+    void watchdog();  // Monitoruje i naprawia uszkodzone komponenty systemu
+    void setOffsets();  // Kalibruje wszystkie czujniki przez uśrednianie odczytów
+    void handleGps();  // Odczytuje i przetwarza dane z odbiornika GPS
+    void handleLsm6();  // Odczytuje i przetwarza dane z żyroskopu/akcelerometru LSM6
+    void handleAdxl();  // Odczytuje i przetwarza dane z akcelerometru ADXL
+    void handleBmp();  // Odczytuje i przetwarza dane z barometru BMP
+    void handleMax();  // Odczytuje i przetwarza dane z termopary MAX31855
+
+    void parashuteOpen();  // Uruchamia procedurę otwarcia spadochronu (aktywuje solenoid)
+    void activateSolenoid(uint8_t, uint32_t);  // Aktywuje elektrozawór (solenoid) z określoną liczbą impulsów
+    void updateSolenoid();  // Aktualizuje stan elektrozaworu (sterowanie timingiem impulsów)
+    void updateBuzzer();
+    void updateStatus();  // Aktualizuje status lotu rakiety na podstawie danych z czujników
 
   public:
-    Rakieta();
+    Rakieta();  // Konstruktor: Inicjalizuje wszystkie komponenty, ustawia piny I/O i stan błędów
 
-    void init();
-
-    bool initializeRadio();
-    void printRadioStatus();
-    void onRx();
-    void transmit(String message);
-
-    bool writeRocketData();
-    void sendMsg();
-
-    void watchdog();
-    void setOffsets();
-    void handleGps();
-    void handleLsm6();
-    void handleAdxl();
-    void handleBmp();
-    void handleMax();
-    void updateStatus();
-    void servoDeg(uint8_t);
+    void init();  // Inicjalizuje wszystkie systemy rakiety, kalibruje czujniki i ustawia serwo
+    void loop();
 };
 
 #endif  // RAKIETA_H

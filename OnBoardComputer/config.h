@@ -8,14 +8,14 @@
   #define debugln(x)    Serial.println(x)
   #define debugBin(x)   Serial.print(x, BIN)
   #define debugHex(x)   Serial.print(x, HEX)
-  /// #define debugf(...)   Serial.printf(__VA_ARGS__)
+  #define debugf(...)   Serial.printf(__VA_ARGS__)
 #else
   #define debugInit(x)
   #define debug(x)
   #define debugln(x)
   #define debugBin(x)
   #define debugHex(x)
-  /// #define debugf(...)
+  #define debugf(...)
 #endif
 
 #define max(a, b) (((a) > (b)) ? (a) : (b))
@@ -32,7 +32,6 @@
 #define CODING_RATE            5        // 5-8
 #define POWER                  21       // dBm (do 21-22 dBm)
 #define preambleLength         15       // 6-30 symboli im dłuższe tym lepsze synchro i zasięg? ale wolniejsza transmisja
-
 
 // LORA / TIMING
 #define RF_FREQUENCY                        868000000 // Hz
@@ -59,8 +58,9 @@
 #define SEND_INTERVAL_DEBUG                 1000
 #define SEND_INTERVAL_IDLE                  5000
 #define SEND_INTERVAL_READY                 1000
+#define SEND_INTERVAL_BURN                  100
 #define SEND_INTERVAL_RISING                100
-#define SEND_INTERVAL_FALLING               1000
+#define SEND_INTERVAL_FALLING               500
 #define SEND_INTERVAL_TOUCHDOWN             10000
 
 // SENSORS / MEMORY
@@ -79,11 +79,7 @@
 #define SERVO_PWM_FREQ                      50
 #define SERVO_MIN_PULSE_WIDTH               544
 #define SERVO_MAX_PULSE_WIDTH               2500
-
-// BATTERY
-#define BATTERY_MIN_VOLTAGE                 1.5f  // do zmiany na prawdziwe dane
-#define BATTERY_MAX_VOLTAGE                 4.3f  // do zmiany na prawdziwe dane
-#define BATTERY_CHECK_INTERVAL              50000
+#define SOLENOID_PULSE                      150
 
 // PINS  /// WSZYSTKIE DO ZAMIANY NA RZECZYWISTE PINY, NIE UŻYWAMY JUŻ MCP !!
 #define BATTERY                             1  // dedykowany do baterii
@@ -125,19 +121,15 @@
 #define FLASH_FILE_ERROR                    _BV(9)
 
 // WATCHDOG / BUZZER
-#define WATCHDOG_INTERVAL                   1000
+#define WATCHDOG_INTERVAL                   2500
 
 #define BUZZER_INTERVAL_DEBUG               5000
 #define BUZZER_INTERVAL_IDLE                10000
 #define BUZZER_INTERVAL_READY               1000
-#define BUZZER_INTERVAL_RISING_FALLING      65535
+#define BUZZER_INTERVAL_BURN                65535
+#define BUZZER_INTERVAL_RISING              65535
+#define BUZZER_INTERVAL_FALLING             65535
 #define BUZZER_INTERVAL_TOUCHDOWN           10000
-
-#define FREQUENCY_DEBUG                     1000  // trzeba zobaczyć co jest bardziej przyjemne co mniej
-#define FREQUENCY_IDLE                      2000
-#define FREQUENCY_READY                     5000  // tu nie może być przyjemne
-#define FREQUENCY_RISING_FALLING            2000
-#define FREQUENCY_TOUCHDOWN                 5000
 
 // STATUS UPGRADE CONST
 #define BURN_ACCEL_THRESHOLD                5.0f
@@ -145,7 +137,7 @@
 #define BURN_ACCEL_CHECK_TIME               300
 #define RISING_ACCEL_CHECK_TIME             3000
 #define APOGEE_CHECK_TIME                   1000
-#define MAX_RISING_TIME                     40000
+#define MAX_RISING_TIME                     45000
 #define MIN_PARACHUTE_TIME                  50000
 #define TOUCHDOWN_CHECK_TIME                2000
 

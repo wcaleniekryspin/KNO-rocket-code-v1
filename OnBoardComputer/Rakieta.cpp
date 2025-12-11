@@ -1,16 +1,26 @@
 #include "Rakieta.h"
 
 /***************************************************
-TO DO:
- - dodać mnożniki do wartości w funkcji prepareMsg()
- - zrobić parashuteOpen()
+chyba DONE:
+ - reakcja na komendy
+ - działanie funkcji parashuteOpen()
  - dodać zmianę parametrów (buzzer, msgDelay i inne) w funkcji updateStatus()
+ -- dodać opcję wyłączenia zbierania danych handleSensors = true/false
 
- -- dodać ustawianie error dla LoRa
- -- odkomentować servo dla esp32/stm32
+TO DO:
+ - do zmiany większość STATUS UPGRADE CONST w pliku config.h !!!
+
+ -- dodać mnożniki do wartości w funkcji prepareMsg()
+ -- dodać funkcję emergencyStop() (odcina tlen i wyrzuca spadochron)
+ -- teraz jest jedna termopara trzeba dodać więcej
+
  -- zastanowić się czy wychodzić z funkcji handleSensor() jeśli jest błąd na sensorze
+ -- zastanowić się czy robić reset jeśli LoRa nie działa
 
- - do zmiany większość STATUS UPGRADE CONST !!!
+ --- sprawdzić hspi dla SPIFlasha
+ --- czy chcemy dodać czujnik ciśnienia do komory spalania??
+
+ ---- dodać tryp oszczędzania energii
 
 ***************************************************/
 
@@ -55,10 +65,53 @@ void Rakieta::init()
 
   delay(100);
   setOffsets();
-  
+
   // Move servo to position 0
-  setupServo();
-  servoDeg(0);
+  myServo.attach(SERVO);
+  myServo.write(0);
+}
+
+void Rakieta::loop()
+{
+  checkRadio();
+  uint32_t now = millis();
+  if (now - lastWatchdogTime < watchdogInterval)
+  {
+    lastWatchdogTime = now;
+    watchdog();
+  }
+
+  if (handleSensors)
+  {
+    now = millis();
+    if (now - lastHandleSensorsTime < handleSensorsInterval)  /// do zmiany (JAKIEJ???)
+    {
+      lastHandleSensorsTime = now;
+      handleGps();
+      handleLsm6();
+      handleAdxl();
+      handleBmp();
+      handleMax();
+    }
+
+    updateSolenoid();
+    updateBuzzer();
+    updateStatus();
+
+    now = millis();
+    if (now - lastDataSaveTime < dataSaveInterval)
+    {
+      lastDataSaveTime = now;
+      writeRocketData();
+    }
+  }
+
+  now = millis();
+  if (now - lastMsgSendTime < msgSendInterval)
+  {
+    lastMsgSendTime = now;
+    sendMsg();
+  }
 }
 
 bool Rakieta::initializeRadio()
@@ -69,6 +122,7 @@ bool Rakieta::initializeRadio()
   {
     debug("Błąd: ");
     debugln(state);
+    error |= LORA_ERROR;
     return false;
   }
   
@@ -83,12 +137,14 @@ bool Rakieta::initializeRadio()
   {
     debug("Błąd konfiguracji: ");
     debugln(state);
+    error |= LORA_ERROR;
     return false;
   }
 
   radio.setDio1Action(setOperationFlag);
   printRadioStatus();
   debugln(F("Radio gotowe - nasłuchiwanie..."));
+  error &= ~LORA_ERROR;
   return true;
 }
 
@@ -103,16 +159,77 @@ void Rakieta::startListening()
   transmitting = false;
 }
 
-void Rakieta::onRx()
+void Rakieta::handleCommand(String msg)
 {
-  String str;
-  int state = radio.readData(str);
+  if (msg == "TO_DEBUG")
+  {
+    status = State::debug;
+    handleSensorsInterval = SEND_INTERVAL_DEBUG / 4;
+    dataSaveInterval = SEND_INTERVAL_DEBUG / 4;
+    msgSendInterval = SEND_INTERVAL_DEBUG;
+    buzzerInterval = BUZZER_INTERVAL_DEBUG;
+  }
+  else if (msg == "TO_IDLE")
+  {
+    status = State::idle;
+    handleSensorsInterval = SEND_INTERVAL_IDLE / 4;
+    dataSaveInterval = SEND_INTERVAL_IDLE / 4;
+    msgSendInterval = SEND_INTERVAL_IDLE;
+    buzzerInterval = BUZZER_INTERVAL_IDLE;
+  }
+  else if (msg == "TO_READY")
+  {
+    status = State::ready;
+    handleSensorsInterval = SEND_INTERVAL_READY / 4;
+    dataSaveInterval = SEND_INTERVAL_READY / 4;
+    msgSendInterval = SEND_INTERVAL_READY;
+    buzzerInterval = BUZZER_INTERVAL_READY;
+  }
+  else if (msg == "TO_BURN")
+  {
+    status = State::burn;
+    handleSensorsInterval = SEND_INTERVAL_BURN / 4;
+    dataSaveInterval = SEND_INTERVAL_BURN / 4;
+    msgSendInterval = SEND_INTERVAL_BURN;
+    buzzerInterval = BUZZER_INTERVAL_BURN;
+    startTime = millis();
+    myServo.write(90);
+  }
+  else if (msg == "TO_FALLING")
+  {
+    status = State::falling;
+    handleSensorsInterval = SEND_INTERVAL_FALLING / 4;
+    dataSaveInterval = SEND_INTERVAL_FALLING / 4;
+    msgSendInterval = SEND_INTERVAL_FALLING;
+    buzzerInterval = BUZZER_INTERVAL_FALLING;
+    myServo.write(0);
+    parashuteOpen();
+  }
+  else if (msg == "SERVO_TEST") { myServo.write(servoAngle); }
+  else if (msg == "SERVO_PLUS") { if (servoAngle < 45) servoAngle += 2; }
+  else if (msg == "SERVO_PLUS") { if (servoAngle > 2) servoAngle -= 2; }
+  else if (msg == "GET_SERVO_ANGLE") { transmit(String(servoAngle)); }
+  else if (msg == "BEEP_ON") { buzzerEnabled = true; }
+  else if (msg == "BEEP_OFF") { buzzerEnabled = false; }
+  else if (msg == "RESET") { NVIC_SystemReset(); }  /// trzeba zobaczyć czy działa jak nie to jakoś inaczej (NIBY SIĘ ROBI KOMPILACJA WIĘC TRZREBA PRZETESTOWAĆ)
+  else if (msg == "CALIBRATE") { setOffsets(); }
+  else if (msg == "GET_GPS_OFFSET") { sendGpsOffset(); }
+  else if (msg == "HANDLE_SENSORS_ON") { handleSensors = true; }
+  else if (msg == "HANDLE_SENSORS_OFF") { handleSensors = false; }
+}
+
+void Rakieta::checkRadio()
+{
+  if (!radio.available()) return;
+
+  String msg;
+  int state = radio.readData(msg);
   
   if (state == RADIOLIB_ERR_NONE)
   {
     debugln(F("\n== ODEBRANO WIADOMOŚĆ =="));
     debug(F("Dane: "));
-    debugln(str);
+    debugln(msg);
     debug(F("RSSI: "));
     debug(radio.getRSSI());
     debugln(F(" dBm"));
@@ -120,6 +237,10 @@ void Rakieta::onRx()
     debug(radio.getSNR());
     debugln(F(" dB"));
     debugln(F("========\n"));
+
+    /// możliwe że zrobię to komendą z LoRa
+    // if (startTime == 0)
+    //   startTime = millis();
   }
   else
   {
@@ -458,7 +579,7 @@ bool Rakieta::writeRocketData()
   // dataLine += String(batteryVoltage, 2);
   debugln(dataLine);
 
-  /// przenieść na samą górę ↓
+  /// przenieść na samą górę ↓ w końcowym kodzie
   if ((!sdReady || !SDDataFile) && (!flashReady || !flashDataFile)) return false;
   
   flashWriteData(dataLine);
@@ -468,7 +589,7 @@ bool Rakieta::writeRocketData()
 void Rakieta::watchdog()
 {
   lastWatchdogTime = millis();
-  /// uaktualnić
+  /// uaktualnić (W JAKI SPOSÓB??)
   if (error & LORA_ERROR)
   {
     while (!initializeRadio())
@@ -616,7 +737,7 @@ void Rakieta::prepareMsg()
   message.add(int16_t(data.max.temp), maxTempPos, maxTempLen, true);
 
   /// dodać baterie
-  /// message.add(uint8_t(...), batteryPos, batteryLen);
+  // message.add(uint8_t(...), batteryPos, batteryLen);
 }
 
 void Rakieta::sendMsg()
@@ -643,6 +764,19 @@ void Rakieta::sendMsg()
   digitalWrite(LED_1, ledState);
 
   debugln("Sending DONE");
+}
+
+void Rakieta::sendGpsOffset()
+{
+  String msg = "";
+
+  msg += String(millis());
+  msg += ",";
+  msg += offsets.gps.lat;
+  msg += ",";
+  msg += offsets.gps.lng;
+
+  transmit(msg);  
 }
 
 void Rakieta::setOffsets()
@@ -720,13 +854,10 @@ void Rakieta::setOffsets()
   offsets.gps.altiF = (i ? (offsets.gps.altiF / i) : 0);
   offsets.gps.speed = (i ? (offsets.gps.speed / i) : 0);
 
-  /// trzeba odkomentować debugf i usunąć to co poniżej
-  /*
   debugf("Valid num: Lsm: %d Adxl: %d Bmp: %d GPS: %d\n", validLsm, validAdxl, validBmp, i);
   debugf("Offsets:\n\tLsm: {ax: %.6f ay: %.6f az: %.6f gx: %.6f gy: %.6f gz: %.6f}\n", offsets.lsm.ax, offsets.lsm.ay, offsets.lsm.az, offsets.lsm.gx, offsets.lsm.gy, offsets.lsm.gz);
   debugf("\tAdxl: {ax: %.6f ay: %.6f az: %.6f}\n\tBmp: alti: %.6f\n", offsets.adxl.ax, offsets.adxl.ay, offsets.adxl.az, offsets.bmp.altitude);
   debugf("\tGPS: {lat: %.6f lng: %.6f altiM: %.6f altiF: %.6f speed: %.6f}\n", offsets.gps.lat, offsets.gps.lng, offsets.gps.altiM, offsets.gps.altiF, offsets.gps.speed);
-  */
 
   debugln("Calibration completed!");
 }
@@ -877,9 +1008,80 @@ void Rakieta::handleMax()
   }
 }
 
-void Rakieta::parashuteOpen()  /// trzeba dokończyć
+void Rakieta::activateSolenoid(uint8_t pulses = 3, uint32_t duration = SOLENOID_PULSE)
+{
+  solenoidActive = true;
+  solenoidPulses = pulses * 2; // Włącz i wyłącz to 2 stany
+  solenoidPulseDuration = duration;
+  solenoidStartTime = millis();
+  solenoidPulseInterval = duration;
+  
+  // Pierwsze włączenie
+  digitalWrite(SOLENOID, HIGH);
+  debugln("Solenoid ON - pulse 1");
+}
+
+void Rakieta::updateSolenoid()
+{
+  if (!solenoidActive) return;
+  
+  uint32_t now = millis();
+  uint32_t elapsed = now - solenoidStartTime;
+  uint32_t pulseIndex = elapsed / solenoidPulseInterval;
+  
+  if (pulseIndex < solenoidPulses)
+  {
+    // Parzyste indeksy = WŁĄCZ, nieparzyste = WYŁĄCZ
+    bool shouldBeOn = !(pulseIndex & 1);
+    bool isOn = digitalRead(SOLENOID);
+    
+    if (shouldBeOn && !isOn)
+    {
+      digitalWrite(SOLENOID, HIGH);
+      debugf("Solenoid ON - pulse %d\n", (pulseIndex / 2) + 1);
+    }
+    else if (!shouldBeOn && isOn)
+    {
+      digitalWrite(SOLENOID, LOW);
+      debug("Solenoid OFF\n");
+    }
+  }
+  else
+  {
+    // Koniec sekwencji
+    digitalWrite(SOLENOID, LOW);
+    solenoidActive = false;
+    debugln("Solenoid sequence completed");
+  }
+}
+
+void Rakieta::updateBuzzer()
+{
+  if (!buzzerEnabled)
+  {
+    digitalWrite(BUZZER, LOW);
+    return;
+  }
+
+  uint32_t now = millis();
+  if (now - lastBuzzerTime >= buzzerInterval) {
+    buzzerState = !buzzerState;
+    lastBuzzerTime = now;
+    digitalWrite(BUZZER, buzzerState ? HIGH : LOW);
+
+    // Debugowanie
+    if (buzzerState) {
+      debugln("Buzzer ON");
+    } else {
+      debugln("Buzzer OFF");
+    }
+  }
+}
+
+void Rakieta::parashuteOpen()  /// trzeba dokończyć (CHYBA JUŻ JEST OK)
 {
   debugln("Opening parachute!");
+  activateSolenoid(3, 100);
 }
 
 void Rakieta::updateStatus()
@@ -892,20 +1094,22 @@ void Rakieta::updateStatus()
       break;
     case State::idle:
       break;
-    case State::ready:  /// możliwe że zrobię to komendą z LoRa
-      // przyśpieszenie powyżej 1 m/s^2 przez minimum 0,15s -> przechodzi na burn
-      if (startTime == 0)
-        startTime = now;
+    case State::ready:
       break;
     case State::burn:
     {
       // przyśpieszenie mniejsze niż 5 m/s^2 przez minimum 0,3s ? -> przechodzi na rising
       if (max(data.lsm.lastTotalAccel, data.adxl.lastTotalAccel) < BURN_ACCEL_THRESHOLD)
       {
-        if (afterburnStartTime == 0)
-          afterburnStartTime = now;
+        if (afterburnStartTime == 0) { afterburnStartTime = now; }
         else if (now - afterburnStartTime >= BURN_ACCEL_CHECK_TIME)
+        {
           status = State::rising;
+          handleSensorsInterval = SEND_INTERVAL_RISING / 4;
+          dataSaveInterval = SEND_INTERVAL_RISING / 4;
+          msgSendInterval = SEND_INTERVAL_RISING;
+          buzzerInterval = BUZZER_INTERVAL_RISING;
+        }
       }
       else
       {
@@ -935,7 +1139,9 @@ void Rakieta::updateStatus()
       }
 
       if (afterRisingStartTime > 0 && (now - afterRisingStartTime >= RISING_ACCEL_CHECK_TIME))
+      {
         status = State::apogee;
+      }
       break;
     }
     case State::apogee:
@@ -959,6 +1165,10 @@ void Rakieta::updateStatus()
       if (apogeeStartTime > 0 && (now - apogeeStartTime >= APOGEE_CHECK_TIME))
       {
         status = State::falling;
+        handleSensorsInterval = SEND_INTERVAL_FALLING / 4;
+        dataSaveInterval = SEND_INTERVAL_FALLING / 4;
+        msgSendInterval = SEND_INTERVAL_FALLING;
+        buzzerInterval = BUZZER_INTERVAL_FALLING;
         parashuteOpen();
       }
       break;
@@ -984,6 +1194,10 @@ void Rakieta::updateStatus()
       if (touchdownStartTime > 0 && (now - touchdownStartTime >= TOUCHDOWN_CHECK_TIME))
       {
         status = State::touchdown;
+        handleSensorsInterval = SEND_INTERVAL_TOUCHDOWN;
+        dataSaveInterval = SEND_INTERVAL_TOUCHDOWN;
+        msgSendInterval = SEND_INTERVAL_TOUCHDOWN;
+        buzzerInterval = BUZZER_INTERVAL_TOUCHDOWN;
       }
       break;
     }
@@ -996,53 +1210,11 @@ void Rakieta::updateStatus()
   if (now - startTime > MAX_RISING_TIME && (status == State::burn || status == State::rising || status == State::apogee))
   {
     status = State::falling;
+    handleSensorsInterval = SEND_INTERVAL_FALLING / 4;
+    dataSaveInterval = SEND_INTERVAL_FALLING / 4;
+    msgSendInterval = SEND_INTERVAL_FALLING;
+    buzzerInterval = BUZZER_INTERVAL_FALLING;
     parashuteOpen();
   }
 }
-
-void Rakieta::setupServo()
-{
-  /*
-  ledc_timer_config_t timer_conf = {
-      .speed_mode = SERVO_PWM_MODE,
-      .duty_resolution = SERVO_PWM_RESOLUTION,
-      .timer_num = SERVO_PWM_TIMER,
-      .freq_hz = SERVO_PWM_FREQ,
-      .clk_cfg = LEDC_AUTO_CLK
-  };
-  ledc_timer_config(&timer_conf);
-
-  ledc_channel_config_t channel_conf = {
-      .gpio_num = SERVO,
-      .speed_mode = SERVO_PWM_MODE,
-      .channel = SERVO_PWM_CHANNEL,
-      .intr_type = LEDC_INTR_DISABLE,
-      .timer_sel = SERVO_PWM_TIMER,
-      .duty = 0,
-      .hpoint = 0
-  };
-  ledc_channel_config(&channel_conf);
-  */
-}
-
-void Rakieta::servoDeg(uint8_t deg)
-{
-  /*
-  uint32_t pulse_width = map(deg, 0, 180, SERVO_MIN_PULSE_WIDTH, SERVO_MAX_PULSE_WIDTH);
-  uint32_t duty = (pulse_width * (1 << SERVO_PWM_RESOLUTION)) / 20000; // 20ms period
-  
-  ledc_set_duty(SERVO_PWM_MODE, SERVO_PWM_CHANNEL, duty);
-  ledc_update_duty(SERVO_PWM_MODE, SERVO_PWM_CHANNEL);
-  */
-}
-
-
-
-
-
-
-
-
-
-
 

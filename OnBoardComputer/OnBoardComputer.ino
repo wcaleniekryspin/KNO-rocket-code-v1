@@ -1,5 +1,6 @@
 #include "Rakieta.h"
 
+
 Rakieta rakieta;
 
 void setup()
@@ -17,14 +18,7 @@ void setup()
 
 void loop()
 {
-  rakieta.handleGps();
-  rakieta.handleLsm6();
-  rakieta.handleAdxl();
-  rakieta.handleBmp();
-  rakieta.handleMax();
-  rakieta.updateStatus();
-  rakieta.writeRocketData();  
-  rakieta.sendMsg();
-  rakieta.watchdog();
-  delay(1000);
+  rakieta.loop();
+  delay(2);
 }
+
