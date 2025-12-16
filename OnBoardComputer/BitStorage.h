@@ -7,7 +7,6 @@
 class BitStorage
 {
 private:
-  uint32_t numer = 0;
   uint8_t message[ARRAY_SIZE];
 
   void setBit(uint16_t bitIndex, bool val);

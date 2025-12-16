@@ -5,20 +5,20 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <SoftwareSerial.h>  /// zamienić na HardwareSerial
-#include <RadioLib.h>
-#include <TinyGPSPlus.h>
+#include <HardwareSerial.h>
+#include <RadioLib.h>           // SX1262
+#include <TinyGPSPlus.h>        // MAX M10S
 #include <Adafruit_LSM6DS.h>    // LSM6DS3 via SPI
 #include <Adafruit_BMP3XX.h>    // BMP388 via SPI
 #include <Adafruit_ADXL343.h>   // ADXL375 via SPI
 #include <Adafruit_MAX31855.h>  // MAX31855 via SPI
-#include <Adafruit_SPIFlash.h>
+#include <Adafruit_SPIFlash.h>  // W25Q128 via SPI
 #include <Servo.h>
 
 #include "config.h"
 #include "BitStorage.h"
 
-// Musi tu być do oprawnego działania modułu RadioLib
+// It must be here for the RadioLib module to function properly
 inline volatile bool operationDone = false;
 inline void setOperationFlag(void) { operationDone = true; }
 
@@ -61,7 +61,7 @@ class Rakieta
       struct {
         float altitude = 0;
       } bmp;
-      struct {
+      struct { /// raczej do usunięcia bo tu nie ma offsetu
       } max;
     } offsets;
 
@@ -71,11 +71,11 @@ class Rakieta
         float lng = 0;
         float altiM = 0;
         float altiF = 0;
-        float speed = 0;
         uint8_t h = 0;
         uint8_t m = 0;
         uint8_t s = 0;
         uint8_t centi = 0;
+        float speed = 0;
         float course = 0;
         uint8_t satNum = 0;
         uint8_t hdop = 0;
@@ -106,31 +106,38 @@ class Rakieta
         uint32_t lastTime = 0;
       } adxl;
       struct {
+        float temp = 0;
         float pressure = 0;
         float altitude = 0;
         float lastAltitude = 0;
         float lastVerticalSpeed = 0;
         float maxAltitude = 0;
         uint32_t lastTime = 0;
-        float temp = 0;
       } bmp;
       struct {
         float temp = 0;
       } max;
+      struct {
+        float voltage = 0;
+      } battery;
     } data;
 
-    bool handleSensors = true;
+    SPIClass* spi1;      // High speed sensors (LSM6, ADXL)
+    SPIClass* spi2;      // Memory (SD, Flash)
+    SPIClass* spi3;      // Thermal/pressure sensors (BMP, MAX)
 
     bool ledState = false;
     bool buzzerEnabled = true;
     bool buzzerState = false;
+    bool handleSensors = true;
+    bool inFlight = false;
 
     uint16_t error = 0;
     uint32_t packet = 0;
 
     const uint32_t watchdogInterval = WATCHDOG_INTERVAL;
-    uint32_t handleSensorsInterval = SEND_INTERVAL_DEBUG / 4;
-    uint32_t dataSaveInterval = SEND_INTERVAL_DEBUG / 4;
+    uint32_t handleSensorsInterval = SEND_INTERVAL_DEBUG / 2;  /// do zastanowienia się czy dzielić czy nie
+    uint32_t dataSaveInterval = SEND_INTERVAL_DEBUG / 2;
     uint32_t msgSendInterval = SEND_INTERVAL_DEBUG;
     uint32_t buzzerInterval = BUZZER_INTERVAL_DEBUG;
 
@@ -145,7 +152,7 @@ class Rakieta
     uint32_t afterRisingStartTime = 0;
     uint32_t apogeeStartTime = 0;
     uint32_t touchdownStartTime = 0;
-    
+
     bool solenoidActive = false;
     uint32_t solenoidStartTime = 0;
     uint8_t solenoidPulses = 0;
@@ -155,70 +162,76 @@ class Rakieta
 
     BitStorage message;
     SX1262 radio;
-    
+
     bool transmitting = false;
     bool messagePending = false;
     String pendingMessage = "";
     String receivedMessage = "";
-    
+    uint32_t messageStartTime = 0;
+
     bool sdReady = false, flashReady = false;
     uint32_t fileNumber = 0;
     String currentFileName;
     File32 SDDataFile;
     File32 flashDataFile;
     SdFat sd;
-    /// SPIClass flashSPI(HSPI);
-    /// Adafruit_FlashTransport_SPI flashTransport(FLASH_CS, &flashSPI);
     Adafruit_FlashTransport_SPI flashTransport;
     Adafruit_SPIFlash flash;
     FatVolume fatfs;
 
     Servo myServo;
     TinyGPSPlus gps;
-    SoftwareSerial gpsSerial;
+    HardwareSerial gpsSerial;
     Adafruit_LSM6DS lsm;
     Adafruit_BMP3XX bmp;
     Adafruit_ADXL343 adxl;
     Adafruit_MAX31855 max3;
-  
-    bool initializeRadio();  // Inicjalizuje moduł radiowy LoRa z konfiguracją parametrów
-    void printRadioStatus();  // Wyświetla aktualną konfigurację i status radia
-    void checkRadio();  // Obsługuje odebrane wiadomości LoRa (callback)
-    void transmit(String message);  // Wysyła wiadomość przez LoRa z obsługą buforowania
-    void prepareMsg();  // Przygotowuje dane do transmisji przez LoRa (pakowanie w strukturę binarną)
-    void startListening();  // Rozpoczyna nasłuchiwanie na kanale LoRa
-    void handleCommand(String);
-    void sendMsg();  // Wysyła przygotowaną wiadomość przez LoRa i zwiększa numer pakietu
-    void sendGpsOffset();
 
-    bool flashInit();  // Inicjalizuje pamięć flash SPI z systemem plików FAT
-    bool SDInit();  // Inicjalizuje kartę SD i tworzy system plików
-    bool flashFindNextFileNumber();  // Znajduje kolejny dostępny numer pliku w pamięci flash
-    bool flashOpenNewFile();  // Otwiera nowy plik CSV w pamięci flash do zapisu danych
-    bool flashWriteData(const String& data);  // Zapisuje dane do pliku w pamięci flash
-    bool SDOpenNewFile();  // Otwiera nowy plik CSV na karcie SD do zapisu danych
-    bool SDWriteData(const String& data);  // Zapisuje dane do pliku na karcie SD
-    bool writeRocketData();  // Zapisuje wszystkie dane z czujników do plików CSV
+    bool initializeRadio();                    // Initializes the LoRa radio module with the required parameter configuration
+    void printRadioStatus();                   // Prints the radio's current configuration and status to the console/log
+    void checkRadio();                         // Handles incoming LoRa messages (callback invoked when a packet is received)
+    void transmit(String);                     // Sends a message over LoRa with buffering/queueing support
+    void prepareMsg();                         // Prepares data for transmission over LoRa by packing it into a binary structure
+    void startListening();                     // Starts listening on the LoRa channel for incoming messages
+    void handleCommand(String);                // Executes an action in response to a received command string
+    void sendMsg();                            // Sends the prepared message over LoRa and increments the packet counter
+    void sendGpsOffset();                      // Sends GPS offset values to the ground station
 
-    void watchdog();  // Monitoruje i naprawia uszkodzone komponenty systemu
-    void setOffsets();  // Kalibruje wszystkie czujniki przez uśrednianie odczytów
-    void handleGps();  // Odczytuje i przetwarza dane z odbiornika GPS
-    void handleLsm6();  // Odczytuje i przetwarza dane z żyroskopu/akcelerometru LSM6
-    void handleAdxl();  // Odczytuje i przetwarza dane z akcelerometru ADXL
-    void handleBmp();  // Odczytuje i przetwarza dane z barometru BMP
-    void handleMax();  // Odczytuje i przetwarza dane z termopary MAX31855
+    String prepareOffsetsMsg();                // Builds and returns a string message containing the sensor offsets
+    String prepareDataLineMsg();               // Builds and returns a string message containing a single data line
 
-    void parashuteOpen();  // Uruchamia procedurę otwarcia spadochronu (aktywuje solenoid)
-    void activateSolenoid(uint8_t, uint32_t);  // Aktywuje elektrozawór (solenoid) z określoną liczbą impulsów
-    void updateSolenoid();  // Aktualizuje stan elektrozaworu (sterowanie timingiem impulsów)
-    void updateBuzzer();
-    void updateStatus();  // Aktualizuje status lotu rakiety na podstawie danych z czujników
+    bool flashInit();                          // Initializes the SPI flash memory and mounts/creates a FAT filesystem
+    bool SDInit();                             // Initializes the SD card and sets up the filesystem for use
+    bool flashFindNextFileNumber();            // Finds the next available file number/index in flash storage
+    bool flashOpenNewFile();                   // Opens a new CSV file in flash memory for writing telemetry/data
+    bool flashWriteData(const String&);        // Writes the provided string data to the currently open flash file
+    bool SDOpenNewFile();                      // Opens a new CSV file on the SD card for writing telemetry/data
+    bool SDWriteData(const String&);           // Writes the provided string data to the currently open SD file
+    bool writeRocketData();                    // Writes all current sensor and telemetry data to CSV files (flash and/or SD)
+
+    void watchdog();                           // Monitors system components and attempts to recover or repair faulty modules
+    void setOffsets();                         // Calibrates sensors by averaging multiple readings to determine offsets
+    void handleGps();                          // Reads and processes data from the GPS receiver
+    void handleLsm6();                         // Reads and processes data from the LSM6 gyroscope/accelerometer
+    void handleAdxl();                         // Reads and processes data from the ADXL accelerometer
+    void handleBmp();                          // Reads and processes data from the BMP barometer/altimeter
+    void handleMax();                          // Reads and processes temperature from the MAX31855 thermocouple amplifier
+    void handleBattery();                      // Reads the battery voltage and updates battery state information
+
+    void parashuteOpen();                      // Initiates the parachute deployment procedure (activates solenoid)
+    void activateSolenoid(uint8_t, uint32_t);  // Activates a solenoid valve with the specified number of pulses and pulse timing
+    void updateSolenoid();                     // Updates solenoid state machine and pulse timing (call frequently to manage pulses)
+    void updateBuzzer();                       // Updates buzzer state (tones, durations, alerts)
+    void updateStatus();                       // Updates the rocket's flight status/state based on current sensor data
+
+    void setFlightMode(bool);                  // Sets the inFlight flag (true = flight mode enabled, false = ground mode)
+    void emergencyStop();                      // Performs an emergency stop procedure to halt the mission safely
 
   public:
-    Rakieta();  // Konstruktor: Inicjalizuje wszystkie komponenty, ustawia piny I/O i stan błędów
+    Rakieta();                                 // Constructor: initializes internal members, configures I/O pins, and clears error state
 
-    void init();  // Inicjalizuje wszystkie systemy rakiety, kalibruje czujniki i ustawia serwo
-    void loop();
+    void init();                               // Initializes all rocket systems, calibrates sensors, and positions servos
+    void loop();                               // Main rocket loop: runs periodic tasks, sensor handling, communications, and state updates
 };
 
 #endif  // RAKIETA_H

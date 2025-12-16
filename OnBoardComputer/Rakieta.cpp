@@ -5,33 +5,47 @@ chyba DONE:
  - reakcja na komendy
  - działanie funkcji parashuteOpen()
  - dodać zmianę parametrów (buzzer, msgDelay i inne) w funkcji updateStatus()
+
  -- dodać opcję wyłączenia zbierania danych handleSensors = true/false
+ -- dodać mnożniki do wartości w funkcji prepareMsg()
+ - zmiana softwareserial gps na hardwareserial
+    W Rakieta.h: HardwareSerial gpsSerial(PA10, PA9);
+    W setup(): gpsSerial.begin(9600);
+ -- dodać timeout w funkcji transmit(String)
+    while (!operationDone && (millis() - messageStartTime >= RX_TIMEOUT))
+ -- dodać funkcję zapisu do pliku czasów xStartTime po touchdown
+ - do zmiany większość STATUS UPGRADE CONST w pliku config.h !!!
+ -- dodać funkcję emergencyStop() (odcina tlen i wyrzuca spadochron)
+
+ -- zastanowić się czy wychodzić z funkcji handleSensor() jeśli jest błąd na sensorze (NIE)
+ -- zastanowić się czy robić reset jeśli LoRa nie działa (TAK bo tylko w inFlight == false)
 
 TO DO:
- - do zmiany większość STATUS UPGRADE CONST w pliku config.h !!!
-
- -- dodać mnożniki do wartości w funkcji prepareMsg()
- -- dodać funkcję emergencyStop() (odcina tlen i wyrzuca spadochron)
- -- teraz jest jedna termopara trzeba dodać więcej
-
- -- zastanowić się czy wychodzić z funkcji handleSensor() jeśli jest błąd na sensorze
- -- zastanowić się czy robić reset jeśli LoRa nie działa
-
- --- sprawdzić hspi dla SPIFlasha
+ --- Dodać listę wiadomości do buforowania
+ --- dodać tryp oszczędzania energii
  --- czy chcemy dodać czujnik ciśnienia do komory spalania??
+     kod do odczytu ciśnienia
+     kod PID do sterowania serwem
 
- ---- dodać tryp oszczędzania energii
+ ---- dodać hardware watchdog w trybach debug/idle/ready (może przez flagę bool inFlight)
+ ---- teraz jest jedna termopara trzeba dodać więcej (na przyszłość)
 
 ***************************************************/
 
-Rakieta::Rakieta(): status(State::debug), gpsSerial(3, 4), lsm(), bmp(), 
-  adxl((uint8_t)255, &SPI), max3((uint8_t)255, &SPI), flashTransport(FLASH_CS, &SPI),
-  flash(&flashTransport), radio(new Module(NSS, DIO1, NRST, BUSY))
+Rakieta::Rakieta():
+  status(State::debug),
+  gpsSerial(GPS_RX, GPS_TX),
+  lsm(), bmp(), adxl((uint8_t)255, &SPI), max3((uint8_t)255, &SPI),
+  spi1(new SPIClass(SPI1_SCK, SPI1_MISO, SPI1_MOSI)),
+  spi2(new SPIClass(SPI2_SCK, SPI2_MISO, SPI2_MOSI)),
+  spi3(new SPIClass(SPI3_SCK, SPI3_MISO, SPI3_MOSI)),
+  flashTransport(FLASH_CS, spi2), flash(&flashTransport),
+  radio(new Module(NSS, DIO1, NRST, BUSY))
 {
   error |= LORA_ERROR | LSM_ERROR | BMP_ERROR | ADXL_ERROR | MAX_ERROR |
            SD_ERROR | SD_FILE_ERROR | FLASH_ERROR | FLASH_FILE_ERROR;
 
-  pinMode(BATTERY, INPUT);
+  pinMode(BATTERY, INPUT_ANALOG);
   pinMode(BUZZER, OUTPUT);
   pinMode(SERVO, OUTPUT);
   pinMode(LED_1, OUTPUT);
@@ -57,34 +71,65 @@ void Rakieta::init()
 {
   debugln("Initializing rocket systems...");
 
+  spi1->begin();
+  spi1->beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE3));  // SPI1 - High speed sensors (5 MHz)
+
+  spi2->begin();
+  spi2->beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));  // SPI2 - Memory (20 MHz)
+
+  spi3->begin();
+  spi3->beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));  // SPI3 - Thermal sensors (1 MHz)
+
+  gpsSerial.begin(GPS_BAUDRATE);
+  debugln("GPS UART initialized");
+
   // Init all sensors
   watchdog();
 
-  if (error == 0) debugln("All systems OK");
-  else { debug("Errors present: "); debugBin(error); }
-
+  if (error == 0)
+  {
+    debugln("All systems OK");
+    digitalWrite(LED_2, LOW);
+  }
+  else
+  {
+    debug("Errors present: ");
+    debugBin(error);
+    digitalWrite(LED_2, HIGH);
+  }
+  
   delay(100);
   setOffsets();
 
   // Move servo to position 0
   myServo.attach(SERVO);
   myServo.write(0);
+
+  setFlightMode(false);
 }
 
 void Rakieta::loop()
 {
-  checkRadio();
-  uint32_t now = millis();
-  if (now - lastWatchdogTime < watchdogInterval)
-  {
-    lastWatchdogTime = now;
-    watchdog();
-  }
+  // 1. HIGHEST PRIORITY: RECOVERY SYSTEM
+  updateSolenoid();
+  updateStatus();
+
+  // 2. CRITICAL: EMERGENCY SAFETY CHECKS
+  if (inFlight) { emergencyStop(); }
 
   if (handleSensors)
   {
+    // 3. MEDIUM PRIORITY: DATA SAVING
     now = millis();
-    if (now - lastHandleSensorsTime < handleSensorsInterval)  /// do zmiany (JAKIEJ???)
+    if (now - lastDataSaveTime < dataSaveInterval)
+    {
+      lastDataSaveTime = now;
+      writeRocketData();
+    }
+
+    // 4. MEDIUM PRIORITY: SENSOR READING
+    now = millis();
+    if (now - lastHandleSensorsTime < handleSensorsInterval)
     {
       lastHandleSensorsTime = now;
       handleGps();
@@ -92,50 +137,58 @@ void Rakieta::loop()
       handleAdxl();
       handleBmp();
       handleMax();
-    }
-
-    updateSolenoid();
-    updateBuzzer();
-    updateStatus();
-
-    now = millis();
-    if (now - lastDataSaveTime < dataSaveInterval)
-    {
-      lastDataSaveTime = now;
-      writeRocketData();
+      handleBattery();
     }
   }
 
-  now = millis();
+  // 5. MEDIUM/LOW PRIORITY: RADIO CHECK
+  checkRadio();
+
+  // 6. LOW PRIORITY: WATCHDOG (only when NOT in flight)
+  if (!inFlight)
+  {
+    uint32_t now = millis();
+    if (now - lastWatchdogTime < watchdogInterval)
+    {
+      lastWatchdogTime = now;
+      watchdog();
+    }
+  }
+
+  // 7. LOW PRIORITY: MESSAGE SENDING
+  uint32_t now = millis();
   if (now - lastMsgSendTime < msgSendInterval)
   {
     lastMsgSendTime = now;
     sendMsg();
   }
+
+  // 8. VERY LOW PRIORITY: BUZZER
+  updateBuzzer();
 }
 
 bool Rakieta::initializeRadio()
 {
-  debugln("Inicjalizacja SX1262...");
+  debugln("Initialization SX1262");
   int state = radio.begin(FREQUENCY);
   if (state != RADIOLIB_ERR_NONE)
   {
-    debug("Błąd: ");
+    debug("Error: ");
     debugln(state);
     error |= LORA_ERROR;
     return false;
   }
   
-  // Konfiguracja parametrów LoRa
+  // LoRa parameter configuration
   state = radio.setBandwidth(BANDWIDTH);
   state |= radio.setSpreadingFactor(SF);
   state |= radio.setCodingRate(CODING_RATE);
   state |= radio.setOutputPower(POWER);
-  state |= radio.setPreambleLength(preambleLength);
+  state |= radio.setPreambleLength(PREAMBLE_LENGTH);
   
   if (state != RADIOLIB_ERR_NONE)
   {
-    debug("Błąd konfiguracji: ");
+    debug("Configuration error: ");
     debugln(state);
     error |= LORA_ERROR;
     return false;
@@ -143,7 +196,7 @@ bool Rakieta::initializeRadio()
 
   radio.setDio1Action(setOperationFlag);
   printRadioStatus();
-  debugln(F("Radio gotowe - nasłuchiwanie..."));
+  debugln(F("Radio ready - listening..."));
   error &= ~LORA_ERROR;
   return true;
 }
@@ -153,40 +206,44 @@ void Rakieta::startListening()
   int state = radio.startReceive();
   if (state != RADIOLIB_ERR_NONE)
   {
-    debug(F("Błąd rozpoczęcia nasłuchiwania: "));
+    debug(F("Error starting listening: "));
     debugln(state);
   }
   transmitting = false;
 }
 
-void Rakieta::handleCommand(String msg)
+void Rakieta::handleCommand(String command)
 {
-  if (msg == "TO_DEBUG")
+  if (command == "TO_DEBUG")
   {
+    setFlightMode(false);
     status = State::debug;
     handleSensorsInterval = SEND_INTERVAL_DEBUG / 4;
     dataSaveInterval = SEND_INTERVAL_DEBUG / 4;
     msgSendInterval = SEND_INTERVAL_DEBUG;
     buzzerInterval = BUZZER_INTERVAL_DEBUG;
   }
-  else if (msg == "TO_IDLE")
+  else if (command == "TO_IDLE")
   {
+    setFlightMode(false);
     status = State::idle;
     handleSensorsInterval = SEND_INTERVAL_IDLE / 4;
     dataSaveInterval = SEND_INTERVAL_IDLE / 4;
     msgSendInterval = SEND_INTERVAL_IDLE;
     buzzerInterval = BUZZER_INTERVAL_IDLE;
   }
-  else if (msg == "TO_READY")
+  else if (command == "TO_READY")
   {
+    setFlightMode(false);
     status = State::ready;
     handleSensorsInterval = SEND_INTERVAL_READY / 4;
     dataSaveInterval = SEND_INTERVAL_READY / 4;
     msgSendInterval = SEND_INTERVAL_READY;
     buzzerInterval = BUZZER_INTERVAL_READY;
   }
-  else if (msg == "TO_BURN")
+  else if (command == "TO_BURN")
   {
+    setFlightMode(true);
     status = State::burn;
     handleSensorsInterval = SEND_INTERVAL_BURN / 4;
     dataSaveInterval = SEND_INTERVAL_BURN / 4;
@@ -195,8 +252,9 @@ void Rakieta::handleCommand(String msg)
     startTime = millis();
     myServo.write(90);
   }
-  else if (msg == "TO_FALLING")
+  else if (command == "TO_FALLING")
   {
+    setFlightMode(true);
     status = State::falling;
     handleSensorsInterval = SEND_INTERVAL_FALLING / 4;
     dataSaveInterval = SEND_INTERVAL_FALLING / 4;
@@ -205,54 +263,61 @@ void Rakieta::handleCommand(String msg)
     myServo.write(0);
     parashuteOpen();
   }
-  else if (msg == "SERVO_TEST") { myServo.write(servoAngle); }
-  else if (msg == "SERVO_PLUS") { if (servoAngle < 45) servoAngle += 2; }
-  else if (msg == "SERVO_PLUS") { if (servoAngle > 2) servoAngle -= 2; }
-  else if (msg == "GET_SERVO_ANGLE") { transmit(String(servoAngle)); }
-  else if (msg == "BEEP_ON") { buzzerEnabled = true; }
-  else if (msg == "BEEP_OFF") { buzzerEnabled = false; }
-  else if (msg == "RESET") { NVIC_SystemReset(); }  /// trzeba zobaczyć czy działa jak nie to jakoś inaczej (NIBY SIĘ ROBI KOMPILACJA WIĘC TRZREBA PRZETESTOWAĆ)
-  else if (msg == "CALIBRATE") { setOffsets(); }
-  else if (msg == "GET_GPS_OFFSET") { sendGpsOffset(); }
-  else if (msg == "HANDLE_SENSORS_ON") { handleSensors = true; }
-  else if (msg == "HANDLE_SENSORS_OFF") { handleSensors = false; }
+  else if (command == "SERVO_TEST") { myServo.write(servoAngle); delay(100); myServo.write(0); }
+  else if (command == "SERVO_PLUS") { if (servoAngle < 45) servoAngle += 2; }
+  else if (command == "SERVO_MINUS") { if (servoAngle > 2) servoAngle -= 2; }
+  else if (command == "GET_SERVO_ANGLE") { transmit(String(servoAngle)); }
+  else if (command == "BEEP_ON") { buzzerEnabled = true; }
+  else if (command == "BEEP_OFF") { buzzerEnabled = false; }
+  else if (command == "RESET") { NVIC_SystemReset(); }  /// trzeba zobaczyć czy działa jak nie to jakoś inaczej (NIBY SIĘ ROBI KOMPILACJA WIĘC TRZREBA PRZETESTOWAĆ)
+  else if (command == "CALIBRATE") { setOffsets(); }
+  else if (command == "GET_GPS_OFFSET") { sendGpsOffset(); }
+  else if (command == "HANDLE_SENSORS_ON") { handleSensors = true; }
+  else if (command == "HANDLE_SENSORS_OFF") { handleSensors = false; }
+  else if (command == "EMERGENCY_STOP") { emergencyStop(); }
 }
 
 void Rakieta::checkRadio()
 {
-  if (!radio.available()) return;
+  if (!radio.available())
+  {
+    // Check if we have queued message and radio is ready
+    if (messagePending && operationDone)
+    {
+      transmit(pendingMessage);
+      messagePending = false;
+    }
+    return;
+  }
 
   String msg;
   int state = radio.readData(msg);
-  
+
   if (state == RADIOLIB_ERR_NONE)
   {
-    debugln(F("\n== ODEBRANO WIADOMOŚĆ =="));
-    debug(F("Dane: "));
+    debugln(F("== MESSAGE RECEIVED =="));
+    debug(F("Message: "));
     debugln(msg);
     debug(F("RSSI: "));
     debug(radio.getRSSI());
-    debugln(F(" dBm"));
+    debug(F(" dBm, "));
     debug(F("SNR: "));
     debug(radio.getSNR());
     debugln(F(" dB"));
-    debugln(F("========\n"));
 
-    /// możliwe że zrobię to komendą z LoRa
-    // if (startTime == 0)
-    //   startTime = millis();
+    handleCommand(msg);
   }
   else
   {
-    debug(F("Błąd odczytu danych: "));
+    debug(F("Data reading error: "));
     debugln(state);
   }
 }
 
 void Rakieta::printRadioStatus()
 {
-  debugln(F("\n=== STATUS RADIA ==="));
-  debug(F("Częstotliwość: "));
+  debugln(F("\n=== RADIO STATUS ==="));
+  debug(F("Frequency: "));
   debug(FREQUENCY);
   debugln(F(" MHz"));
   debug(F("Moc: "));
@@ -270,36 +335,56 @@ void Rakieta::printRadioStatus()
 
 void Rakieta::transmit(String message)
 {
-  if (operationDone)
+  if (!operationDone)
   {
-    operationDone = false;
-    if (message.length() > 255)
+    if (messagePending)
     {
-      debugln(F("Błąd: Wiadomość zbyt długa"));
+      debugln("LoRa busy & message queue full - dropping");
       return;
     }
+    pendingMessage = message;
+    messagePending = true;
+    debugln("LoRa busy - message queued");
+    return;
+  }
 
-    if (transmitting)
-    {
-      pendingMessage = message;
-      messagePending = true;
-      debugln(F("Transmisja w toku - wiadomość zapisana w buforze"));
-      return;
-    }
-    
-    debug(F("Wysyłanie: "));
-    debugln(message);
-    
-    transmitting = true;
-    int state = radio.startTransmit(message);
-    
-    if (state != RADIOLIB_ERR_NONE)
-    {
-      debug(F("Błąd rozpoczęcia transmisji: "));
-      debugln(state);
-      transmitting = false;
-      startListening();
-    }
+  if (message.length() > 255)
+  {
+    debugln(F("Error: Message too long"));
+    return;
+  }
+  
+  if (transmitting)
+  {
+    pendingMessage = message;
+    messagePending = true;
+    debugln(F("Transmission in progress - message saved in the buffer"));
+    return;
+  }
+
+  operationDone = false;
+
+  debug(F("Sending: "));
+  debugln(message);
+
+  transmitting = true;
+  messageStartTime = millis();
+  int state = radio.startTransmit(message);
+
+  if (state != RADIOLIB_ERR_NONE)
+  {
+    debug(F("Transmit error: "));
+    debugln(state);
+    operationDone = true;
+    startListening();
+  }
+  
+  if (millis() - messageStartTime >= RX_TIMEOUT)
+  {
+    debugln("ERROR: LoRa timeout, forcing radio reset");
+    radio.standby();
+    operationDone = true;
+    startListening();
   }
 }
 
@@ -345,7 +430,7 @@ bool Rakieta::flashInit()
 bool Rakieta::flashFindNextFileNumber()
 {
   fileNumber = 0;
-  while (fileNumber < 1000) // Maksymalnie 1000 plików
+  while (fileNumber < 1000) // Max 1000 files
   {
     currentFileName = "data_";
     if (fileNumber < 10) currentFileName += "00";
@@ -385,12 +470,13 @@ bool Rakieta::flashOpenNewFile()
     return false;
   }
   
-  /// Nagłówek CSV do zmiany
   flashWriteData("timestamp,packet,status,error,"
-              "gps_lat,gps_lng,gps_alt,"
-              "lsm_ax,lsm_ay,lsm_az,"
-              "bmp_alt,bmp_press,bmp_temp,"
-              "max_temp,battery");
+                 "gps_lat,gps_lng,gps_alt,gps_h,gps_m,gps_s,gps_c,"
+                 "gps_speed,gps_course,gps_satNum,gps_hdop,"
+                 "lsm_ax,lsm_ay,lsm_az,lsm_gx,lsm_gy,lsm_gz,lsm_temp,lsm_speed,"
+                 "adxl_ax,adxl_ay,adxl_az,adxl_speed,"
+                 "bmp_temp,bmp_press,bmp_alt,bmp_speed,"
+                 "max_temp,battery");
   
   debug("File opened: "); debugln(currentFileName.c_str());
   return true;
@@ -402,7 +488,7 @@ bool Rakieta::flashWriteData(const String& data)
   
   flashDataFile.println(data);
   
-  // Flush every 10 writes
+  // Flush data every 10 writes
   static uint16_t flashWriteCount = 0;
   flashWriteCount++;
   if (flashWriteCount >= 10)
@@ -420,11 +506,11 @@ bool Rakieta::SDInit()
 
   bool sdInit = false;
   
-  #if defined(ARDUINO_ARCH_ESP32)  // ESP32 - użyj SPI z domyślnymi pinami
+  #if defined(ARDUINO_ARCH_ESP32)  /// ESP32 - użyj SPI z domyślnymi pinami
     if (!sd.begin()) {
-  #elif defined(ARDUINO_ARCH_STM32)  // STM32 - często wymaga podania CS pinu
+  #elif defined(ARDUINO_ARCH_STM32)  /// STM32 - często wymaga podania CS pinu
     if (!sd.begin(SD_CS)) {
-  #else  // Dla innych platform
+  #else  /// Dla innych platform
     if (!sd.begin(10)) {
   #endif
     
@@ -465,11 +551,12 @@ bool Rakieta::SDOpenNewFile()
     return false;
   }
   
-  /// Nagłówek CSV do zmiany
   SDWriteData("timestamp,packet,status,error,"
-              "gps_lat,gps_lng,gps_alt,"
-              "lsm_ax,lsm_ay,lsm_az,"
-              "bmp_alt,bmp_press,bmp_temp,"
+              "gps_lat,gps_lng,gps_alt,gps_h,gps_m,gps_s,gps_c,"
+              "gps_speed,gps_course,gps_satNum,gps_hdop,"
+              "lsm_ax,lsm_ay,lsm_az,lsm_gx,lsm_gy,lsm_gz,lsm_temp,lsm_speed,"
+              "adxl_ax,adxl_ay,adxl_az,adxl_speed,"
+              "bmp_temp,bmp_press,bmp_alt,bmp_speed,"
               "max_temp,battery");
   
   debug("File opened: "); debugln(currentFileName.c_str());
@@ -482,7 +569,7 @@ bool Rakieta::SDWriteData(const String& data)
   
   SDDataFile.println(data);
   
-  // Flush every 10 writes
+  // Flush data every 10 writes
   static uint16_t SDWriteCount = 0;
   SDWriteCount++;
   if (SDWriteCount >= 10)
@@ -494,111 +581,36 @@ bool Rakieta::SDWriteData(const String& data)
   return true;
 }
 
-/// trzeba dodać mnożniki
 bool Rakieta::writeRocketData()
 {
-  String dataLine = "";
+  String msg = prepareDataLineMsg();
+  debugln(msg);
   
-  // Timestamp
-  dataLine += String(millis());
-  dataLine += ",";
-  dataLine += String(packet);
-  dataLine += ",";
-  dataLine += String(static_cast<int>(status));
-  dataLine += ",";
-  dataLine += String(error, HEX);
-  dataLine += ",";
-  
-  // GPS
-  dataLine += String(data.gps.lat, 6);
-  dataLine += ",";
-  dataLine += String(data.gps.lng, 6);
-  dataLine += ",";
-  dataLine += String(data.gps.altiM, 2);
-  dataLine += ",";
-  dataLine += String(data.gps.h);
-  dataLine += ",";
-  dataLine += String(data.gps.m);
-  dataLine += ",";
-  dataLine += String(data.gps.s);
-  dataLine += ",";
-  dataLine += String(data.gps.centi);
-  dataLine += ",";
-  dataLine += String(data.gps.speed, 2);
-  dataLine += ",";
-  dataLine += String(data.gps.course, 0);
-  dataLine += ",";
-  dataLine += String(data.gps.satNum);
-  dataLine += ",";
-  dataLine += String(data.gps.hdop);
-  dataLine += ",";
-  
-  // LSM6
-  dataLine += String(data.lsm.ax, 4);
-  dataLine += ",";
-  dataLine += String(data.lsm.ay, 4);
-  dataLine += ",";
-  dataLine += String(data.lsm.az, 4);
-  dataLine += ",";
-  dataLine += String(data.lsm.gx, 4);
-  dataLine += ",";
-  dataLine += String(data.lsm.gy, 4);
-  dataLine += ",";
-  dataLine += String(data.lsm.gz, 4);
-  dataLine += ",";
-  dataLine += String(data.lsm.lastTotalSpeed, 4);
-  dataLine += ",";
-  dataLine += String(data.lsm.temp, 2);
-  dataLine += ",";
-
-  // ADXL
-  dataLine += String(data.adxl.ax, 4);
-  dataLine += ",";
-  dataLine += String(data.adxl.ay, 4);
-  dataLine += ",";
-  dataLine += String(data.adxl.az, 4);
-  dataLine += ",";
-  
-  // BMP
-  dataLine += String(data.bmp.temp, 2);
-  dataLine += ",";
-  dataLine += String(data.bmp.pressure, 2);
-  dataLine += ",";
-  dataLine += String(data.bmp.altitude, 2);
-  dataLine += ",";
-  dataLine += String(data.bmp.lastVerticalSpeed, 2);
-  dataLine += ",";
-  
-  // MAX
-  dataLine += String(data.max.temp, 2);
-  dataLine += ",";
-  
-  /// do dodania później
-  // BATTERY
-  // dataLine += ",";
-  // dataLine += String(batteryVoltage, 2);
-  debugln(dataLine);
-
-  /// przenieść na samą górę ↓ w końcowym kodzie
   if ((!sdReady || !SDDataFile) && (!flashReady || !flashDataFile)) return false;
   
-  flashWriteData(dataLine);
-  SDWriteData(dataLine);
+  flashWriteData(msg);
+  SDWriteData(msg);
 }
 
 void Rakieta::watchdog()
 {
-  lastWatchdogTime = millis();
-  /// uaktualnić (W JAKI SPOSÓB??)
+  if (inFlight) { return; }
+
   if (error & LORA_ERROR)
   {
-    while (!initializeRadio())
+    uint8_t times = 0;
+    while (!initializeRadio() && times < 10;)
     {
-      debugln(F("Błąd inicjalizacji radia!"));
-      delay(100);
+      debugln(F("Radio initialization error!"));
+      times++;
     }
-    startListening();
-    delay(10);
+
+    if (times >= 10) { NVIC_SystemReset(); }
+    else
+    {
+      startListening();
+      delay(10);
+    }
   }
 
   if (error & LSM_ERROR)
@@ -614,7 +626,6 @@ void Rakieta::watchdog()
       lsm.setGyroRange(LSM6DS_GYRO_RANGE_2000_DPS);
       lsm.setAccelDataRate(LSM6DS_RATE_416_HZ);
       lsm.setGyroDataRate(LSM6DS_RATE_416_HZ);
-      // debugf("asr: %d gsr: %d", lsm.accelerationSampleRate(), lsm.gyroscopeSampleRate());
       error &= ~LSM_ERROR;
     }
     delay(10);
@@ -700,44 +711,44 @@ void Rakieta::prepareMsg()
 {
   uint32_t now = millis();
   message.add(uint32_t(now / 10), timePos, timeLen);
-  message.add(uint32_t(packet), packetPos, packetLen);
+  message.add(uint16_t(packet), packetPos, packetLen);
   message.add(uint16_t(error), errorPos, errorLen);
   message.add(uint8_t(status), statusPos, statusLen);
+  message.add(uint8_t(handleSensors), handlePos, handleLen);
 
-  message.add(uint16_t(data.gps.lat), gpsLatPos, gpsLatLen);
-  message.add(uint16_t(data.gps.lng), gpsLngPos, gpsLngLen);
-  message.add(uint16_t(data.gps.altiM), gpsAltiPos, gpsAltiLen);
+  message.add(int16_t(data.gps.lat * 100000), gpsLatPos, gpsLatLen, true);
+  message.add(int16_t(data.gps.lng * 100000), gpsLngPos, gpsLngLen, true);
+  message.add(uint16_t(data.gps.altiM * 10), gpsAltiPos, gpsAltiLen);
   message.add(uint8_t(data.gps.h), gpsHourPos, gpsHourLen);
   message.add(uint8_t(data.gps.m), gpsMinPos, gpsMinLen);
   message.add(uint8_t(data.gps.s), gpsSecPos, gpsSecLen);
   message.add(uint8_t(data.gps.centi), gpsCentisecPos, gpsCentisecLen);
-  message.add(int16_t(data.gps.speed), gpsSpeedPos, gpsSpeedLen, true);
+  message.add(int16_t(data.gps.speed * 10), gpsSpeedPos, gpsSpeedLen, true);
   message.add(uint16_t(data.gps.course), gpsCoursePos, gpsCourseLen);
   message.add(uint8_t(data.gps.satNum), gpsSatNumPos, gpsSatNumLen);
   message.add(uint8_t(data.gps.hdop), gpsHdopPos, gpsHdopLen);
   
-  message.add(int16_t(data.lsm.ax), lsmAccelXPos, lsmAccelXLen, true);
-  message.add(int16_t(data.lsm.ay), lsmAccelYPos, lsmAccelYLen, true);
-  message.add(int16_t(data.lsm.az), lsmAccelZPos, lsmAccelZLen, true);
-  message.add(int16_t(data.lsm.gx), lsmGyroXPos, lsmGyroXLen, true);
-  message.add(int16_t(data.lsm.gy), lsmGyroYPos, lsmGyroYLen, true);
-  message.add(int16_t(data.lsm.gz), lsmGyroZPos, lsmGyroZLen, true);
-  message.add(int16_t(data.lsm.lastTotalSpeed), lsmSpeedPos, lsmSpeedLen, true);
-  message.add(uint8_t(data.lsm.temp), lsmTempPos, lsmTempLen);
+  message.add(int16_t(data.lsm.ax * 100), lsmAccelXPos, lsmAccelXLen, true);
+  message.add(int16_t(data.lsm.ay * 100), lsmAccelYPos, lsmAccelYLen, true);
+  message.add(int16_t(data.lsm.az * 100), lsmAccelZPos, lsmAccelZLen, true);
+  message.add(int16_t(data.lsm.gx * 10), lsmGyroXPos, lsmGyroXLen, true);
+  message.add(int16_t(data.lsm.gy * 10), lsmGyroYPos, lsmGyroYLen, true);
+  message.add(int16_t(data.lsm.gz * 10), lsmGyroZPos, lsmGyroZLen, true);
+  message.add(int8_t(data.lsm.temp), lsmTempPos, lsmTempLen, true);
+  message.add(int16_t(data.lsm.lastTotalSpeed * 10), lsmSpeedPos, lsmSpeedLen, true);
   
-  message.add(int16_t(data.adxl.ax), adxlAccelXPos, adxlAccelXLen, true);
-  message.add(int16_t(data.adxl.ay), adxlAccelYPos, adxlAccelYLen, true);
-  message.add(int16_t(data.adxl.az), adxlAccelZPos, adxlAccelZLen, true);
+  message.add(int16_t(data.adxl.ax), adxlAccelXPos * 10, adxlAccelXLen, true);
+  message.add(int16_t(data.adxl.ay), adxlAccelYPos * 10, adxlAccelYLen, true);
+  message.add(int16_t(data.adxl.az), adxlAccelZPos * 10, adxlAccelZLen, true);
+  message.add(int16_t(data.adxl.lastTotalSpeed * 10), adxlSpeedPos, adxlSpeedLen, true);
 
-  message.add(uint8_t(data.bmp.temp), bmpTempPos, bmpTempLen);
-  message.add(uint16_t(data.bmp.pressure), bmpPressPos, bmpPressLen);
-  message.add(uint16_t(data.bmp.altitude), bmpAltiPos, bmpAltiLen);
-  message.add(int16_t(data.bmp.lastVerticalSpeed), bmpSpeedPos, bmpSpeedLen, true);
+  message.add(int8_t(data.bmp.temp), bmpTempPos, bmpTempLen, true);
+  message.add(uint16_t(data.bmp.pressure / 10), bmpPressPos, bmpPressLen);  /// sprawdzić czy jest w Pa czy w hPa
+  message.add(uint16_t(data.bmp.altitude * 10), bmpAltiPos, bmpAltiLen);
+  message.add(int16_t(data.bmp.lastVerticalSpeed * 10), bmpSpeedPos, bmpSpeedLen, true);
 
   message.add(int16_t(data.max.temp), maxTempPos, maxTempLen, true);
-
-  /// dodać baterie
-  // message.add(uint8_t(...), batteryPos, batteryLen);
+  message.add(uint8_t(data.battery.voltage * 10), batteryPos, batteryLen);
 }
 
 void Rakieta::sendMsg()
@@ -766,14 +777,139 @@ void Rakieta::sendMsg()
   debugln("Sending DONE");
 }
 
-void Rakieta::sendGpsOffset()
+String Rakieta::prepareOffsetsMsg()
 {
-  String msg = "";
+  String msg = "Valid num:Lsm:";
+  msg += String(validLsm);
+  msg += ",Adxl:";
+  msg += String(validAdxl);
+  msg += ",Bmp:";
+  msg += String(validBmp);
+  msg += ",GPS:";
+  msg += String(validGPS);
+  msg += "Offsets:Lsm:{ax:";
+  msg += String(offsets.lsm.ax);
+  msg += ",ay:";
+  msg += String(offsets.lsm.ay);
+  msg += ",az:";
+  msg += String(offsets.lsm.az);
+  msg += ",gx:";
+  msg += String(offsets.lsm.gx);
+  msg += ",gy:";
+  msg += String(offsets.lsm.gy);
+  msg += ",gz:";
+  msg += String(offsets.lsm.gz);
+  msg += "}Adxl:{ax:";
+  msg += String(offsets.adxl.ax);
+  msg += ",ay:";
+  msg += String(offsets.adxl.ay);
+  msg += ",az:";
+  msg += String(offsets.adxl.az);
+  msg += "}GPS:{lat:";
+  msg += String(offsets.gps.lat);
+  msg += ",lng:";
+  msg += String(offsets.gps.lng);
+  msg += ",altiM:";
+  msg += String(offsets.gps.altiM);
+  msg += ",speed:";
+  msg += String(offsets.gps.speed);
+  msg += "}";
+  return msg;
+}
 
+String Rakieta::prepareDataLineMsg()
+{
+  String msg = "RocketData:";
+
+  // Timestamp
   msg += String(millis());
   msg += ",";
-  msg += offsets.gps.lat;
+  msg += String(packet);
   msg += ",";
+  msg += String(static_cast<int>(status));
+  msg += ",";
+  msg += String(error, HEX);
+  msg += ",";
+  
+  // GPS
+  msg += String(data.gps.lat, 6);
+  msg += ",";
+  msg += String(data.gps.lng, 6);
+  msg += ",";
+  msg += String(data.gps.altiM, 2);
+  msg += ",";
+  msg += String(data.gps.h);
+  msg += ",";
+  msg += String(data.gps.m);
+  msg += ",";
+  msg += String(data.gps.s);
+  msg += ",";
+  msg += String(data.gps.centi);
+  msg += ",";
+  msg += String(data.gps.speed, 2);
+  msg += ",";
+  msg += String(data.gps.course, 0);
+  msg += ",";
+  msg += String(data.gps.satNum);
+  msg += ",";
+  msg += String(data.gps.hdop);
+  msg += ",";
+  
+  // LSM6
+  msg += String(data.lsm.ax, 4);
+  msg += ",";
+  msg += String(data.lsm.ay, 4);
+  msg += ",";
+  msg += String(data.lsm.az, 4);
+  msg += ",";
+  msg += String(data.lsm.gx, 3);
+  msg += ",";
+  msg += String(data.lsm.gy, 3);
+  msg += ",";
+  msg += String(data.lsm.gz, 3);
+  msg += ",";
+  msg += String(data.lsm.temp, 2);
+  msg += ",";
+  msg += String(data.lsm.lastTotalSpeed, 4);
+  msg += ",";
+
+  // ADXL
+  msg += String(data.adxl.ax, 4);
+  msg += ",";
+  msg += String(data.adxl.ay, 4);
+  msg += ",";
+  msg += String(data.adxl.az, 4);
+  msg += ",";
+  msg += String(data.adxl.lastTotalSpeed, 4);
+  msg += ",";
+  
+  // BMP
+  msg += String(data.bmp.temp, 2);
+  msg += ",";
+  msg += String(data.bmp.pressure, 2);  /// sprawdzić czy jest w Pa czy w hPa
+  msg += ",";
+  msg += String(data.bmp.altitude, 2);
+  msg += ",";
+  msg += String(data.bmp.lastVerticalSpeed, 4);
+  msg += ",";
+
+  // MAX
+  msg += String(data.max.temp, 2);
+  msg += ",";
+
+  // BATTERY
+  msg += String(data.battery.voltage, 1);
+  return msg;
+}
+
+void Rakieta::sendGpsOffset()
+{
+  String msg = "GSP offset:Now:";
+
+  msg += String(millis());
+  msg += ",lat:";
+  msg += offsets.gps.lat;
+  msg += ",lng:";
   msg += offsets.gps.lng;
 
   transmit(msg);  
@@ -803,9 +939,9 @@ void Rakieta::setOffsets()
     sensors_event_t event;
     if (adxl.getEvent(&event))
     {
-      offsets.adxl.ax += event.acceleration.x;
-      offsets.adxl.ay += event.acceleration.y;
-      offsets.adxl.az += event.acceleration.z;
+      offsets.adxl.ax += event.acceleration.x * ADXL375_MG2G_MULTIPLIER;
+      offsets.adxl.ay += event.acceleration.y * ADXL375_MG2G_MULTIPLIER;
+      offsets.adxl.az += event.acceleration.z * ADXL375_MG2G_MULTIPLIER;
       validAdxl++;
     }
 
@@ -830,10 +966,10 @@ void Rakieta::setOffsets()
   offsets.bmp.altitude = (validBmp ? (offsets.bmp.altitude / validBmp) : 0);
 
   num = 10;
-  uint8_t i = 0;
+  uint8_t validGPS = 0;
   uint32_t timeout = millis() + 30000;
 
-  while (i < num || millis() < timeout)
+  while (validGPS < num || millis() < timeout)
   {
     if (gps.location.isValid() && gps.altitude.isValid())
     {
@@ -842,23 +978,21 @@ void Rakieta::setOffsets()
       offsets.gps.altiM += gps.altitude.meters();
       offsets.gps.altiF += gps.altitude.feet();
       offsets.gps.speed += gps.speed.mps();
-      i++;
+      validGPS++;
     }
     delay(200);
   }
 
-  /// czy odejmować tylko całości czy całkowitą wartość
-  offsets.gps.lat = int32_t(i ? (offsets.gps.lat / i) : 0);
-  offsets.gps.lng = int32_t(i ? (offsets.gps.lng / i) : 0);
-  offsets.gps.altiM = (i ? (offsets.gps.altiM / i) : 0);
-  offsets.gps.altiF = (i ? (offsets.gps.altiF / i) : 0);
-  offsets.gps.speed = (i ? (offsets.gps.speed / i) : 0);
+  /// czy odejmować tylko całości czy całkowitą wartość (teraz są całości)
+  offsets.gps.lat = int32_t(validGPS ? (offsets.gps.lat / validGPS) : 0);
+  offsets.gps.lng = int32_t(validGPS ? (offsets.gps.lng / validGPS) : 0);
+  offsets.gps.altiM = (validGPS ? (offsets.gps.altiM / validGPS) : 0);
+  offsets.gps.altiF = (validGPS ? (offsets.gps.altiF / validGPS) : 0);
+  offsets.gps.speed = (validGPS ? (offsets.gps.speed / validGPS) : 0);
 
-  debugf("Valid num: Lsm: %d Adxl: %d Bmp: %d GPS: %d\n", validLsm, validAdxl, validBmp, i);
-  debugf("Offsets:\n\tLsm: {ax: %.6f ay: %.6f az: %.6f gx: %.6f gy: %.6f gz: %.6f}\n", offsets.lsm.ax, offsets.lsm.ay, offsets.lsm.az, offsets.lsm.gx, offsets.lsm.gy, offsets.lsm.gz);
-  debugf("\tAdxl: {ax: %.6f ay: %.6f az: %.6f}\n\tBmp: alti: %.6f\n", offsets.adxl.ax, offsets.adxl.ay, offsets.adxl.az, offsets.bmp.altitude);
-  debugf("\tGPS: {lat: %.6f lng: %.6f altiM: %.6f altiF: %.6f speed: %.6f}\n", offsets.gps.lat, offsets.gps.lng, offsets.gps.altiM, offsets.gps.altiF, offsets.gps.speed);
+  String msg = prepareOffsetsMsg();
 
+  debug(msg);
   debugln("Calibration completed!");
 }
 
@@ -937,9 +1071,9 @@ void Rakieta::handleAdxl()
   sensors_event_t event;
   if (adxl.getEvent(&event))
   {
-    data.adxl.ax = event.acceleration.x - offsets.adxl.ax;
-    data.adxl.ay = event.acceleration.y - offsets.adxl.ay;
-    data.adxl.az = event.acceleration.z - offsets.adxl.az;
+    data.adxl.ax = (event.acceleration.x * ADXL375_MG2G_MULTIPLIER) - offsets.adxl.ax;
+    data.adxl.ay = (event.acceleration.y * ADXL375_MG2G_MULTIPLIER) - offsets.adxl.ay;
+    data.adxl.az = (event.acceleration.z * ADXL375_MG2G_MULTIPLIER) - offsets.adxl.az;
 
     uint32_t now = millis();
     float dt = (now - data.adxl.lastTime) / 1000.0f;
@@ -986,7 +1120,7 @@ void Rakieta::handleMax()
 
   if (isnan(tempC) || e)
   {
-    debugln("Błąd odczytu MAX31855!");
+    debugln("MAX31855 read error!");
     error |= MAX_ERROR;
     if (e & MAX31855_FAULT_OPEN)
     {
@@ -1008,15 +1142,20 @@ void Rakieta::handleMax()
   }
 }
 
-void Rakieta::activateSolenoid(uint8_t pulses = 3, uint32_t duration = SOLENOID_PULSE)
+void Rakieta::handleBattery()
+{
+  int rawValue = analogRead(BATTERY);
+  data.battery.voltage = (rawValue * 3.3f / 4095.0f) * 2.0f;  // scale to 3.3V and multiply by the divisor ratio
+}
+
+void Rakieta::activateSolenoid(uint8_t pulses = SOLENOID_PULSE_COUNT, uint32_t duration = SOLENOID_PULSE)
 {
   solenoidActive = true;
-  solenoidPulses = pulses * 2; // Włącz i wyłącz to 2 stany
+  solenoidPulses = pulses * 2; // On and off are 2 states (toggle actions)
   solenoidPulseDuration = duration;
   solenoidStartTime = millis();
   solenoidPulseInterval = duration;
   
-  // Pierwsze włączenie
   digitalWrite(SOLENOID, HIGH);
   debugln("Solenoid ON - pulse 1");
 }
@@ -1031,7 +1170,7 @@ void Rakieta::updateSolenoid()
   
   if (pulseIndex < solenoidPulses)
   {
-    // Parzyste indeksy = WŁĄCZ, nieparzyste = WYŁĄCZ
+    // Even indices = ON, odd indices = OFF
     bool shouldBeOn = !(pulseIndex & 1);
     bool isOn = digitalRead(SOLENOID);
     
@@ -1048,7 +1187,7 @@ void Rakieta::updateSolenoid()
   }
   else
   {
-    // Koniec sekwencji
+    // End of the sequence
     digitalWrite(SOLENOID, LOW);
     solenoidActive = false;
     debugln("Solenoid sequence completed");
@@ -1064,24 +1203,23 @@ void Rakieta::updateBuzzer()
   }
 
   uint32_t now = millis();
-  if (now - lastBuzzerTime >= buzzerInterval) {
+  if (now - lastBuzzerTime >= buzzerInterval)
+  {
     buzzerState = !buzzerState;
     lastBuzzerTime = now;
     digitalWrite(BUZZER, buzzerState ? HIGH : LOW);
 
-    // Debugowanie
-    if (buzzerState) {
-      debugln("Buzzer ON");
-    } else {
-      debugln("Buzzer OFF");
-    }
+    #if SERIAL_DEBUG == 1
+      if (buzzerState) { debugln("Buzzer ON"); }
+      else { debugln("Buzzer OFF"); }
+    #endif
   }
 }
 
 void Rakieta::parashuteOpen()  /// trzeba dokończyć (CHYBA JUŻ JEST OK)
 {
   debugln("Opening parachute!");
-  activateSolenoid(3, 100);
+  activateSolenoid(SOLENOID_PULSE_COUNT, SOLENOID_PULSE);
 }
 
 void Rakieta::updateStatus()
@@ -1099,6 +1237,7 @@ void Rakieta::updateStatus()
     case State::burn:
     {
       // przyśpieszenie mniejsze niż 5 m/s^2 przez minimum 0,3s ? -> przechodzi na rising
+      // acceleration less than 5 m/s^2 for at least 0.3s ? -> goes to rising
       if (max(data.lsm.lastTotalAccel, data.adxl.lastTotalAccel) < BURN_ACCEL_THRESHOLD)
       {
         if (afterburnStartTime == 0) { afterburnStartTime = now; }
@@ -1120,6 +1259,7 @@ void Rakieta::updateStatus()
     case State::rising:
     {
       // obecna alti < max alti, vertical speed < 0, po upływie czasu -> przechodzi na apogee
+      // current alti < max alti, vertical speed < 0, after time -> goes to apogee
       if (data.gps.lastAltitude <= data.gps.maxAltitude || data.bmp.lastAltitude <= data.bmp.maxAltitude)
       {
         uint8_t neg = 0;
@@ -1146,7 +1286,7 @@ void Rakieta::updateStatus()
     }
     case State::apogee:
     {
-      // vertical speed < thresh, po upływie czasu -> przechodzi na falling
+      // vertical speed < thresh, after max time -> goes to falling
       uint8_t neg = 0;
       if (data.gps.lastVerticalSpeed <= MAX_FREEFALLING_SPEED) neg++;
       if (data.bmp.lastVerticalSpeed <= MAX_FREEFALLING_SPEED) neg++;
@@ -1178,6 +1318,7 @@ void Rakieta::updateStatus()
       if (status == State::falling && now - startTime < MIN_PARACHUTE_TIME) return;
         
       // przyśpieszenie = 0, żyro = 0, alti się nie zmienia, vertical speed = 0 -> przechodzi na touchdown
+      // acceleration = 0, gyro = 0, alt speed does not change, vertical speed = 0 -> goes to touchdown
       if (abs(data.gps.lastVerticalSpeed) < 0.1 && abs(data.lsm.lastTotalAccel) < 0.1 &&
           abs(data.lsm.lastTotalRotation) < 0.1 && abs(data.lsm.lastTotalSpeed) < 0.1 &&
           abs(data.adxl.lastTotalSpeed) < 0.1 && abs(data.adxl.lastTotalAccel) < 0.1 &&
@@ -1198,6 +1339,24 @@ void Rakieta::updateStatus()
         dataSaveInterval = SEND_INTERVAL_TOUCHDOWN;
         msgSendInterval = SEND_INTERVAL_TOUCHDOWN;
         buzzerInterval = BUZZER_INTERVAL_TOUCHDOWN;
+
+        String msg = "Start times:Now:";
+
+        msg += String(millis());
+        msg += ",startTime:";
+        msg += String(startTime);
+        msg += ",afterburnStartTime:";
+        msg += String(afterburnStartTime);
+        msg += ",afterRisingStartTime:";
+        msg += String(afterRisingStartTime);
+        msg += ",apogeeStartTime:";
+        msg += String(apogeeStartTime);
+        msg += ",touchdownStartTime:";
+        msg += String(touchdownStartTime);
+
+        flashWriteData(msg);
+        SDWriteData(msg);
+        transmit(msg);
       }
       break;
     }
@@ -1218,3 +1377,44 @@ void Rakieta::updateStatus()
   }
 }
 
+void Rakieta::emergencyStop()
+{
+  bool emergency = false;
+  String log = "";
+
+  if (data.max.temp > 500.0f)  // 500°C emergency!
+  {
+    log += String(millis()) + "EMERGENCY: Engine fire detected! ";
+    emergency = true;
+  }
+
+  float totalAccel = data.adxl.ax * data.adxl.ax + 
+                     data.adxl.ay * data.adxl.ay + 
+                     data.adxl.az * data.adxl.az;
+  if (totalAccel > 10000.0f)  // >100g emergency!
+  {
+    log += String(millis()) + "EMERGENCY: Crash/explosion detected! ";
+    emergency = true;
+  }
+
+  if (emergency)
+  {
+    log += "EXECUTING EMERGENCY STOP!";
+    debugln(log);
+    flashWriteData(log);
+    SDWriteData(log);
+    transmit(log);
+
+    myServo.write(0);  // Close fuel valve
+    parashuteOpen();  // Deploy parachute
+    buzzerEnabled = true;
+    buzzerInterval = BUZZER_INTERVAL_READY;
+  }
+}
+
+void Rakieta::setFlightMode(bool flight)
+{
+  inFlight = flight;
+  debug("Flight mode: ");
+  debugln(inFlight ? "ACTIVE (no watchdog)" : "INACTIVE");
+}

@@ -1,7 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#define SERIAL_DEBUG 1
+#define SERIAL_DEBUG    1
 #if SERIAL_DEBUG == 1
   #define debugInit(x)  Serial.begin(x)
   #define debug(x)      Serial.print(x)
@@ -18,43 +18,60 @@
   #define debugf(...)
 #endif
 
-#define max(a, b) (((a) > (b)) ? (a) : (b))
+#define BV16(x)         (uint16_t(1u) << (x))
+#define max(a, b)       (((a) > (b)) ? (a) : (b))
 
-// NEW LORA
-#define NSS   10
-#define DIO1  2
-#define NRST  3
-#define BUSY  9
-
-#define FREQUENCY              868.0    // MHz
-#define BANDWIDTH              125.0    // kHz
-#define SF                     9        // 7-12
-#define CODING_RATE            5        // 5-8
-#define POWER                  21       // dBm (do 21-22 dBm)
-#define preambleLength         15       // 6-30 symboli im dłuższe tym lepsze synchro i zasięg? ale wolniejsza transmisja
-
-// LORA / TIMING
-#define RF_FREQUENCY                        868000000 // Hz
-#define TX_OUTPUT_POWER                     20        // dBm
-#define LORA_BANDWIDTH                      0         // [0: 125 kHz,
-                                                  //  1: 250 kHz,
-                                                  //  2: 500 kHz,
-                                                  //  3: Reserved]
-#define LORA_SPREADING_FACTOR               7         // [SF7..SF12]
-#define LORA_CODINGRATE                     1         // [1: 4/5,
-                                                  //  2: 4/6,
-                                                  //  3: 4/7,
-                                                  //  4: 4/8]
-#define LORA_PREAMBLE_LENGTH                8
-#define LORA_SYMBOL_TIMEOUT                 0
-#define LORA_FIX_LENGTH_PAYLOAD_ON          false
-#define LORA_IQ_INVERSION_ON                false
+// LoRa CONFIG
+#define FREQUENCY                           868.0    // MHz
+#define BANDWIDTH                           125.0    // kHz
+#define SF                                  9        // 7-12
+#define CODING_RATE                         5        // 5-8
+#define POWER                               20       // dBm (do 17-22 dBm)
+#define PREAMBLE_LENGTH                     15       // 6-30 symbols, the longer the symbols, the better the synchronization and range?, but the slower the transmission.
 
 #define RX_TIMEOUT                          3000
-#define RX_BUFFER_SIZE                      20  // w razie potrzeby zwiększyć
 #define ARRAY_SIZE                          42
 #define HEADER                              (0xFF66)
 
+// SX1262 pins
+#define NSS                                 PE11   // Chip Select
+#define DIO1                                PE10   // Digital IO 1
+#define NRST                                PE9    // Reset
+#define BUSY                                PE8    // Busy
+
+// SPI1 - high-frequency sensors
+#define SPI1_SCK                            PA5
+#define SPI1_MISO                           PA6
+#define SPI1_MOSI                           PA7
+
+// SPI2 - memory
+#define SPI2_SCK                            PB13
+#define SPI2_MISO                           PB14
+#define SPI2_MOSI                           PB15
+
+// SPI3 - thermal/pressure sensors
+#define SPI3_SCK                            PB3
+#define SPI3_MISO                           PB4
+#define SPI3_MOSI                           PB5
+
+#define LSM_CS                              PA4     // LSM6DS3
+#define ADXL_CS                             PB12    // ADXL375
+#define BMP_CS                              PA15    // BMP388
+#define MAX_CS                              PB0     // MAX31855
+#define SD_CS                               PB1     // Karta SD
+#define FLASH_CS                            PB10    // W25Q128
+
+#define BATTERY                             PC0     // ADC_IN10 - voltage measurement
+#define BUZZER                              PE13
+#define SERVO                               PB8
+#define LED_1                               PE14
+#define LED_2                               PE15
+#define SOLENOID                            PE12
+
+#define GPS_RX                              PA10
+#define GPS_TX                              PA9
+
+// TIMING CONFIG
 #define SEND_INTERVAL_DEBUG                 1000
 #define SEND_INTERVAL_IDLE                  5000
 #define SEND_INTERVAL_READY                 1000
@@ -63,66 +80,8 @@
 #define SEND_INTERVAL_FALLING               500
 #define SEND_INTERVAL_TOUCHDOWN             10000
 
-// SENSORS / MEMORY
-#define GPS_BANDWIDTH                       4800
-#define SEA_LEVEL_PRESSURE_HPA              1013.25f
-#define ADXL375_MG2G_MULTIPLIER             0.049f
-#define FLASH_TYPE                          SPIFLASHTYPE_W25Q128
-#define FLASH_SPI                           SPI
-
-// SERVO
-#define SERVO_OPEN_TIME                     150
-#define SERVO_PWM_CHANNEL                   LEDC_CHANNEL_0
-#define SERVO_PWM_TIMER                     LEDC_TIMER_0
-#define SERVO_PWM_MODE                      LEDC_LOW_SPEED_MODE
-#define SERVO_PWM_RESOLUTION                LEDC_TIMER_13_BIT
-#define SERVO_PWM_FREQ                      50
-#define SERVO_MIN_PULSE_WIDTH               544
-#define SERVO_MAX_PULSE_WIDTH               2500
-#define SOLENOID_PULSE                      150
-
-// PINS  /// WSZYSTKIE DO ZAMIANY NA RZECZYWISTE PINY, NIE UŻYWAMY JUŻ MCP !!
-#define BATTERY                             1  // dedykowany do baterii
-#define BUZZER                              3
-#define SERVO                               4
-#define LED_1                               5
-#define LED_2                               6
-#define SOLENOID                            7
-
-#define GPS_RX                              16
-#define GPS_TX                              17
-#define SCK                                 18
-#define MISO                                19
-#define MOSI                                23
-
-// SD 
-// #define SD_USE_SDIO  /// odkomentować dla SDIO, zakomentować dla SPI
-#define SD_SCK   13  
-#define SD_MISO  14
-#define SD_MOSI  15
-#define SD_DETECT_PIN 13
-
-#define LSM_CS                              0
-#define ADXL_CS                             1
-#define MAX_CS                              2
-#define BMP_CS                              3
-#define SD_CS                               4
-#define FLASH_CS                            5
-
-// ERROR CODES
-#define LORA_ERROR                          _BV(0)
-#define LSM_ERROR                           _BV(2)
-#define BMP_ERROR                           _BV(3)
-#define ADXL_ERROR                          _BV(4)
-#define MAX_ERROR                           _BV(5)
-#define SD_ERROR                            _BV(6)
-#define SD_FILE_ERROR                       _BV(7)
-#define FLASH_ERROR                         _BV(8)
-#define FLASH_FILE_ERROR                    _BV(9)
-
 // WATCHDOG / BUZZER
 #define WATCHDOG_INTERVAL                   2500
-
 #define BUZZER_INTERVAL_DEBUG               5000
 #define BUZZER_INTERVAL_IDLE                10000
 #define BUZZER_INTERVAL_READY               1000
@@ -131,29 +90,54 @@
 #define BUZZER_INTERVAL_FALLING             65535
 #define BUZZER_INTERVAL_TOUCHDOWN           10000
 
-// STATUS UPGRADE CONST
+// SENSORS / MEMORY
+#define GPS_BAUDRATE                        4800
+#define SEA_LEVEL_PRESSURE_HPA              1013.25f
+#define ADXL375_MG2G_MULTIPLIER             (0.049f / ADXL343_MG2G_MULTIPLIER)
+
+// SERVO / SOLENOID
+#define SERVO_OPEN_TIME                     150
+#define SOLENOID_PULSE                      150
+#define SOLENOID_PULSE_COUNT                3  // number of pulses
+
+// STATUS UPGRADE CONST      /// tu trzeba wpisać dane z symulacji
 #define BURN_ACCEL_THRESHOLD                5.0f
-#define MAX_FREEFALLING_SPEED               -15
+#define MAX_FREEFALLING_SPEED               (-20.0f)
 #define BURN_ACCEL_CHECK_TIME               300
 #define RISING_ACCEL_CHECK_TIME             3000
 #define APOGEE_CHECK_TIME                   1000
 #define MAX_RISING_TIME                     45000
-#define MIN_PARACHUTE_TIME                  50000
+#define MIN_PARACHUTE_TIME                  (MAX_RISING_TIME + 5000)
 #define TOUCHDOWN_CHECK_TIME                2000
 
+// ERROR CODES
+#define LORA_ERROR                          BV16(0)
+#define LSM_ERROR                           BV16(1)
+#define BMP_ERROR                           BV16(2)
+#define ADXL_ERROR                          BV16(3)
+#define MAX_ERROR                           BV16(4)
+#define SD_ERROR                            BV16(5)
+#define SD_FILE_ERROR                       BV16(6)
+#define FLASH_ERROR                         BV16(7)
+#define FLASH_FILE_ERROR                    BV16(8)
+
 // DATA LEN AND POSITIONS
-#define timePos                             32
+// HEADER for 16 bits
+#define timePos                             16
 #define timeLen                             22
 #define packetPos                           (timePos + timeLen)
-#define packetLen                           22
+#define packetLen                           16
 #define errorPos                            (packetPos + packetLen)
 #define errorLen                            16
 #define statusPos                           (errorPos + errorLen)
-#define statusLen                           3
-#define gpsLatPos                           (statusPos + statusLen)
-#define gpsLatLen                           17
+#define statusLen                           4
+#define handlePos                           (statusPos + statusLen)
+#define handleLen                           1
+
+#define gpsLatPos                           (handlePos + handleLen)
+#define gpsLatLen                           (17+1)
 #define gpsLngPos                           (gpsLatPos + gpsLatLen)
-#define gpsLngLen                           17
+#define gpsLngLen                           (17+1)
 #define gpsAltiPos                          (gpsLngPos + gpsLngLen)
 #define gpsAltiLen                          14
 #define gpsHourPos                          (gpsAltiPos + gpsAltiLen)
@@ -165,46 +149,54 @@
 #define gpsCentisecPos                      (gpsSecPos + gpsSecLen)
 #define gpsCentisecLen                      7
 #define gpsSpeedPos                         (gpsCentisecPos + gpsCentisecLen)
-#define gpsSpeedLen                         10
+#define gpsSpeedLen                         (14+1)
 #define gpsCoursePos                        (gpsSpeedPos + gpsSpeedLen)
 #define gpsCourseLen                        9
 #define gpsSatNumPos                        (gpsCoursePos + gpsCourseLen)
 #define gpsSatNumLen                        3
 #define gpsHdopPos                          (gpsSatNumPos + gpsSatNumLen)
 #define gpsHdopLen                          5
+
 #define lsmAccelXPos                        (gpsHdopPos + gpsHdopLen)
-#define lsmAccelXLen                        15
+#define lsmAccelXLen                        (14+1)
 #define lsmAccelYPos                        (lsmAccelXPos + lsmAccelXLen)
-#define lsmAccelYLen                        15
+#define lsmAccelYLen                        (14+1)
 #define lsmAccelZPos                        (lsmAccelYPos + lsmAccelYLen)
-#define lsmAccelZLen                        15
+#define lsmAccelZLen                        (14+1)
 #define lsmGyroXPos                         (lsmAccelZPos + lsmAccelZLen)
-#define lsmGyroXLen                         10
+#define lsmGyroXLen                         (14+1)
 #define lsmGyroYPos                         (lsmGyroXPos + lsmGyroXLen)
-#define lsmGyroYLen                         10
+#define lsmGyroYLen                         (14+1)
 #define lsmGyroZPos                         (lsmGyroYPos + lsmGyroYLen)
-#define lsmGyroZLen                         10
-#define lsmSpeedPos                         (lsmGyroZPos + lsmGyroZLen)
-#define lsmSpeedLen                         10
-#define lsmTempPos                          (lsmSpeedPos + lsmSpeedLen)
-#define lsmTempLen                          8
-#define adxlAccelXPos                       (lsmTempPos + lsmTempLen)
-#define adxlAccelXLen                       15
+#define lsmGyroZLen                         (14+1)
+#define lsmTempPos                          (lsmGyroZPos + lsmGyroZLen)
+#define lsmTempLen                          (9+1)
+#define lsmSpeedPos                         (lsmTempPos + lsmTempLen)
+#define lsmSpeedLen                         (10+1)
+
+#define adxlAccelXPos                       (lsmSpeedPos + lsmSpeedLen)
+#define adxlAccelXLen                       (15+1)
 #define adxlAccelYPos                       (adxlAccelXPos + adxlAccelXLen)
-#define adxlAccelYLen                       15
+#define adxlAccelYLen                       (15+1)
 #define adxlAccelZPos                       (adxlAccelYPos + adxlAccelYLen)
-#define adxlAccelZLen                       15
-#define bmpTempPos                          (adxlAccelZPos + adxlAccelZLen)
-#define bmpTempLen                          8
+#define adxlAccelZLen                       (15+1)
+#define adxlSpeedPos                        (adxlAccelZPos + adxlAccelZLen)
+#define adxlSpeedLen                        (14+1)
+
+#define bmpTempPos                          (adxlSpeedPos + adxlSpeedLen)
+#define bmpTempLen                          (9+1)
 #define bmpPressPos                         (bmpTempPos + bmpTempLen)
 #define bmpPressLen                         14
 #define bmpAltiPos                          (bmpPressPos + bmpPressLen)
 #define bmpAltiLen                          14
 #define bmpSpeedPos                         (bmpAltiPos + bmpAltiLen)
-#define bmpSpeedLen                         10
+#define bmpSpeedLen                         (14+1)
+
 #define maxTempPos                          (bmpSpeedPos + bmpSpeedLen)
-#define maxTempLen                          12
+#define maxTempLen                          (9+1)
 #define batteryPos                          (maxTempPos + maxTempLen)
 #define batteryLen                          7
+
+// CHECKSUM for 8 bits
 
 #endif  // CONFIG_H

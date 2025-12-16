@@ -47,8 +47,6 @@ void BitStorage::add(uint32_t value, uint16_t pos, int8_t bitSize, bool isSigned
 
 void BitStorage::addCheckSum()
 {
-  add(numer, 16, 16);
-
   uint8_t sum = 0;
   for (uint8_t i = 0; i < ARRAY_SIZE - 1; i++)
     sum ^= message[i];

@@ -5,13 +5,12 @@ Rakieta rakieta;
 
 void setup()
 {
-  debugInit(9600);
+  debugInit(115200);
   delay(50);
   debugln(F("Hello. Rocket setup"));
   
-  // I2C for GPS and SPI
+  // I2C for GPS
   Wire.begin();
-  SPI.begin();
   
   rakieta.init();
 }
@@ -19,6 +18,5 @@ void setup()
 void loop()
 {
   rakieta.loop();
-  delay(2);
+  delay(2);  // for lower power consumption
 }
-
