@@ -27,14 +27,14 @@ class Rakieta
 {
   private:
     enum class State {
-      debug,     // debug purpose only
-      idle,      // waiting in the pad
-      ready,     // waiting for start
-      burn,      // engine run
-      rising,    // engine cut-off
-      apogee,    // waiting for the parashute
-      falling,   // parashute open
-      touchdown  // grounded
+      debug,     // Debug mode: all intervals slow, all data logged
+      idle,      // : waiting on the platform, sparse sensor readings
+      ready,     // Standby: faster readings, waiting for the takeoff command
+      burn,      // Fuel: engine running, fastest readings
+      rising,    // Climbing: after engine shutdown, fast readings
+      apogee,    // Apogee: highest point, preparing for parachute
+      falling,   // Falling: parachute open, average readings
+      touchdown  // Landing: on the ground, sparse readings, recording statistics
     } status;
 
     struct {
@@ -122,9 +122,10 @@ class Rakieta
       } battery;
     } data;
 
-    SPIClass* spi1;      // High speed sensors (LSM6, ADXL)
-    SPIClass* spi2;      // Memory (SD, Flash)
-    SPIClass* spi3;      // Thermal/pressure sensors (BMP, MAX)
+    SPIClass spi1;  // SPIFlash W25Q128
+    SPIClass spi2;  // SD card
+    SPIClass spi3;  // Fast sensors
+    SPIClass spi4;  // Slow sensors
 
     bool ledState = false;
     bool buzzerEnabled = true;
@@ -140,6 +141,12 @@ class Rakieta
     uint32_t dataSaveInterval = SEND_INTERVAL_DEBUG / 2;
     uint32_t msgSendInterval = SEND_INTERVAL_DEBUG;
     uint32_t buzzerInterval = BUZZER_INTERVAL_DEBUG;
+
+    uint8_t validLsm = 0.0f;
+    uint8_t validAdxl = 0.0f;
+    uint8_t validBmp = 0.0f;
+    uint8_t validMax = 0.0f;
+    uint8_t validGPS = 0.0f;
 
     uint32_t lastWatchdogTime = 0;
     uint32_t lastHandleSensorsTime = 0;
@@ -164,8 +171,6 @@ class Rakieta
     SX1262 radio;
 
     bool transmitting = false;
-    bool messagePending = false;
-    String pendingMessage = "";
     String receivedMessage = "";
     uint32_t messageStartTime = 0;
 
@@ -191,6 +196,7 @@ class Rakieta
     void printRadioStatus();                   // Prints the radio's current configuration and status to the console/log
     void checkRadio();                         // Handles incoming LoRa messages (callback invoked when a packet is received)
     void transmit(String);                     // Sends a message over LoRa with buffering/queueing support
+    void transmit(uint8_t*, size_t);          // Sends a message over LoRa with buffering/queueing support
     void prepareMsg();                         // Prepares data for transmission over LoRa by packing it into a binary structure
     void startListening();                     // Starts listening on the LoRa channel for incoming messages
     void handleCommand(String);                // Executes an action in response to a received command string
@@ -207,7 +213,7 @@ class Rakieta
     bool flashWriteData(const String&);        // Writes the provided string data to the currently open flash file
     bool SDOpenNewFile();                      // Opens a new CSV file on the SD card for writing telemetry/data
     bool SDWriteData(const String&);           // Writes the provided string data to the currently open SD file
-    bool writeRocketData();                    // Writes all current sensor and telemetry data to CSV files (flash and/or SD)
+    void writeRocketData();                    // Writes all current sensor and telemetry data to CSV files (flash and/or SD)
 
     void watchdog();                           // Monitors system components and attempts to recover or repair faulty modules
     void setOffsets();                         // Calibrates sensors by averaging multiple readings to determine offsets
@@ -229,6 +235,7 @@ class Rakieta
 
   public:
     Rakieta();                                 // Constructor: initializes internal members, configures I/O pins, and clears error state
+    ~Rakieta();                                // Destructor: 
 
     void init();                               // Initializes all rocket systems, calibrates sensors, and positions servos
     void loop();                               // Main rocket loop: runs periodic tasks, sensor handling, communications, and state updates

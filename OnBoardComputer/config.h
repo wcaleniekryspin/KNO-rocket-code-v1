@@ -19,41 +19,59 @@
 #endif
 
 #define BV16(x)         (uint16_t(1u) << (x))
-#define max(a, b)       (((a) > (b)) ? (a) : (b))
+#ifndef max
+  #define               max(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+#ifndef min
+  #define               min(a, b) (((a) < (b)) ? (a) : (b))
+#endif
 
 // LoRa CONFIG
-#define FREQUENCY                           868.0    // MHz
-#define BANDWIDTH                           125.0    // kHz
+#define FREQUENCY                           868.0f   // MHz
+#define BANDWIDTH                           125.0f   // kHz
 #define SF                                  9        // 7-12
 #define CODING_RATE                         5        // 5-8
 #define POWER                               20       // dBm (do 17-22 dBm)
 #define PREAMBLE_LENGTH                     15       // 6-30 symbols, the longer the symbols, the better the synchronization and range?, but the slower the transmission.
 
-#define RX_TIMEOUT                          3000
-#define ARRAY_SIZE                          42
+#define TX_TIMEOUT                          3000
+#define ARRAY_SIZE                          56
 #define HEADER                              (0xFF66)
 
-// SX1262 pins
+// SX1262 PINS
 #define NSS                                 PE11   // Chip Select
 #define DIO1                                PE10   // Digital IO 1
 #define NRST                                PE9    // Reset
 #define BUSY                                PE8    // Busy
 
-// SPI1 - high-frequency sensors
+// SPI1 - W25Q128 Flash
 #define SPI1_SCK                            PA5
 #define SPI1_MISO                           PA6
 #define SPI1_MOSI                           PA7
+#define SPI1_SPEED                          40000000  // 40 MHz
 
-// SPI2 - memory
+// SPI2 - SD card
 #define SPI2_SCK                            PB13
 #define SPI2_MISO                           PB14
 #define SPI2_MOSI                           PB15
+#define SPI2_SPEED                          20000000  // 20 MHz
 
-// SPI3 - thermal/pressure sensors
+// SPI3 - High-frequency sensors (LSM6DS3, ADXL375)
 #define SPI3_SCK                            PB3
 #define SPI3_MISO                           PB4
 #define SPI3_MOSI                           PB5
+#define SPI3_SPEED                          10000000  // 10 MHz
 
+// SPI4 - Thermal/Pressure sensors (MAX31855, BMP388)
+#define SPI4_SCK                            PE2
+#define SPI4_MISO                           PE5
+#define SPI4_MOSI                           PE6
+#define SPI4_SPEED_SENSORS                  1000000   // 1 MHz
+
+// SPI5 - Wolny (dostępny do innych zastosowań)
+// SPI6 - Wolny (dostępny do innych zastosowań)
+
+// PINS
 #define LSM_CS                              PA4     // LSM6DS3
 #define ADXL_CS                             PB12    // ADXL375
 #define BMP_CS                              PA15    // BMP388
@@ -91,9 +109,9 @@
 #define BUZZER_INTERVAL_TOUCHDOWN           10000
 
 // SENSORS / MEMORY
-#define GPS_BAUDRATE                        4800
+#define GPS_BAUDRATE                        9600
 #define SEA_LEVEL_PRESSURE_HPA              1013.25f
-#define ADXL375_MG2G_MULTIPLIER             (0.049f / ADXL343_MG2G_MULTIPLIER)
+#define ADXL375_MG2G_MULTIPLIER             (0.049f)  // trzeba sprawdzić czy to dodać → / ADXL343_MG2G_MULTIPLIER)
 
 // SERVO / SOLENOID
 #define SERVO_OPEN_TIME                     150

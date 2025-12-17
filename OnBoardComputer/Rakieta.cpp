@@ -12,7 +12,7 @@ chyba DONE:
     W Rakieta.h: HardwareSerial gpsSerial(PA10, PA9);
     W setup(): gpsSerial.begin(9600);
  -- dodać timeout w funkcji transmit(String)
-    while (!operationDone && (millis() - messageStartTime >= RX_TIMEOUT))
+    while (!operationDone && (millis() - messageStartTime >= TX_TIMEOUT))
  -- dodać funkcję zapisu do pliku czasów xStartTime po touchdown
  - do zmiany większość STATUS UPGRADE CONST w pliku config.h !!!
  -- dodać funkcję emergencyStop() (odcina tlen i wyrzuca spadochron)
@@ -21,25 +21,41 @@ chyba DONE:
  -- zastanowić się czy robić reset jeśli LoRa nie działa (TAK bo tylko w inFlight == false)
 
 TO DO:
- --- Dodać listę wiadomości do buforowania
- --- dodać tryp oszczędzania energii
+ -- dodanie trybu oszczędzania energii
+    #include <STM32LowPower.h>
+    void enterSleepMode() {
+      if (!inFlight) {
+        lsm.end();
+        bmp.end();
+        // ...
+
+        LowPower.enableWakeupFrom(GPIOA, PA0, RISING);  // coś innego
+        LowPower.sleep();
+
+        spi1.begin();
+        // ...
+      }
+    }
+
  --- czy chcemy dodać czujnik ciśnienia do komory spalania??
      kod do odczytu ciśnienia
      kod PID do sterowania serwem
 
  ---- dodać hardware watchdog w trybach debug/idle/ready (może przez flagę bool inFlight)
  ---- teraz jest jedna termopara trzeba dodać więcej (na przyszłość)
+ ---- Dodać listę wiadomości do buforowania (bardzo mało ważne raczej, jak znikną dane w transmisji to trudno)
 
 ***************************************************/
 
 Rakieta::Rakieta():
   status(State::debug),
+  spi1(SPI1_SCK, SPI1_MISO, SPI1_MOSI),
+  spi2(SPI2_SCK, SPI2_MISO, SPI2_MOSI),
+  spi3(SPI3_SCK, SPI3_MISO, SPI3_MOSI),
+  spi4(SPI4_SCK, SPI4_MISO, SPI4_MOSI),
   gpsSerial(GPS_RX, GPS_TX),
-  lsm(), bmp(), adxl((uint8_t)255, &SPI), max3((uint8_t)255, &SPI),
-  spi1(new SPIClass(SPI1_SCK, SPI1_MISO, SPI1_MOSI)),
-  spi2(new SPIClass(SPI2_SCK, SPI2_MISO, SPI2_MOSI)),
-  spi3(new SPIClass(SPI3_SCK, SPI3_MISO, SPI3_MOSI)),
-  flashTransport(FLASH_CS, spi2), flash(&flashTransport),
+  lsm(), bmp(), adxl((uint8_t)255, &spi3), max3((uint8_t)255, &spi4),
+  flashTransport(FLASH_CS, spi1), flash(&flashTransport),
   radio(new Module(NSS, DIO1, NRST, BUSY))
 {
   error |= LORA_ERROR | LSM_ERROR | BMP_ERROR | ADXL_ERROR | MAX_ERROR |
@@ -67,24 +83,32 @@ Rakieta::Rakieta():
   digitalWrite(FLASH_CS, HIGH);
 }
 
+Rakieta::~Rakieta()
+{
+  radio.clearDio1Action();
+  myServo.detach();
+
+  if (SDDataFile) SDDataFile.close();
+  if (flashDataFile) flashDataFile.close();
+  
+  digitalWrite(BUZZER, LOW);
+  digitalWrite(SOLENOID, LOW);
+  digitalWrite(LED_1, LOW);
+  digitalWrite(LED_2, LOW);
+
+  // delete spi1; delete spi2; delete spi3; delete spi4;
+}
+
 void Rakieta::init()
 {
   debugln("Initializing rocket systems...");
-
-  spi1->begin();
-  spi1->beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE3));  // SPI1 - High speed sensors (5 MHz)
-
-  spi2->begin();
-  spi2->beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));  // SPI2 - Memory (20 MHz)
-
-  spi3->begin();
-  spi3->beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));  // SPI3 - Thermal sensors (1 MHz)
 
   gpsSerial.begin(GPS_BAUDRATE);
   debugln("GPS UART initialized");
 
   // Init all sensors
   watchdog();
+  startListening();
 
   if (error == 0)
   {
@@ -111,8 +135,8 @@ void Rakieta::init()
 void Rakieta::loop()
 {
   // 1. HIGHEST PRIORITY: RECOVERY SYSTEM
-  updateSolenoid();
-  updateStatus();
+  updateSolenoid();  // Sterowanie elektrozaworem
+  updateStatus();  // Decyzje o otwarciu spadochronu
 
   // 2. CRITICAL: EMERGENCY SAFETY CHECKS
   if (inFlight) { emergencyStop(); }
@@ -120,8 +144,8 @@ void Rakieta::loop()
   if (handleSensors)
   {
     // 3. MEDIUM PRIORITY: DATA SAVING
-    now = millis();
-    if (now - lastDataSaveTime < dataSaveInterval)
+    uint32_t now = millis();
+    if (now - lastDataSaveTime >= dataSaveInterval)
     {
       lastDataSaveTime = now;
       writeRocketData();
@@ -129,7 +153,7 @@ void Rakieta::loop()
 
     // 4. MEDIUM PRIORITY: SENSOR READING
     now = millis();
-    if (now - lastHandleSensorsTime < handleSensorsInterval)
+    if (now - lastHandleSensorsTime >= handleSensorsInterval)
     {
       lastHandleSensorsTime = now;
       handleGps();
@@ -148,7 +172,7 @@ void Rakieta::loop()
   if (!inFlight)
   {
     uint32_t now = millis();
-    if (now - lastWatchdogTime < watchdogInterval)
+    if (now - lastWatchdogTime >= watchdogInterval)
     {
       lastWatchdogTime = now;
       watchdog();
@@ -157,7 +181,7 @@ void Rakieta::loop()
 
   // 7. LOW PRIORITY: MESSAGE SENDING
   uint32_t now = millis();
-  if (now - lastMsgSendTime < msgSendInterval)
+  if (now - lastMsgSendTime >= msgSendInterval)
   {
     lastMsgSendTime = now;
     sendMsg();
@@ -279,17 +303,6 @@ void Rakieta::handleCommand(String command)
 
 void Rakieta::checkRadio()
 {
-  if (!radio.available())
-  {
-    // Check if we have queued message and radio is ready
-    if (messagePending && operationDone)
-    {
-      transmit(pendingMessage);
-      messagePending = false;
-    }
-    return;
-  }
-
   String msg;
   int state = radio.readData(msg);
 
@@ -333,43 +346,36 @@ void Rakieta::printRadioStatus()
   debugln(F("===================\n"));
 }
 
-void Rakieta::transmit(String message)
+void Rakieta::transmit(String msg)
 {
-  if (!operationDone)
-  {
-    if (messagePending)
-    {
-      debugln("LoRa busy & message queue full - dropping");
-      return;
-    }
-    pendingMessage = message;
-    messagePending = true;
-    debugln("LoRa busy - message queued");
-    return;
-  }
-
-  if (message.length() > 255)
+  if (msg.length() > 255)
   {
     debugln(F("Error: Message too long"));
     return;
   }
-  
-  if (transmitting)
+
+  if (!operationDone)
   {
-    pendingMessage = message;
-    messagePending = true;
-    debugln(F("Transmission in progress - message saved in the buffer"));
-    return;
+    if (millis() - messageStartTime >= TX_TIMEOUT)
+    {
+      debugln("ERROR: LoRa timeout, forcing radio reset");
+      radio.standby();
+      delay(2);
+      startListening();
+    }
+    else
+    {
+      debugln("LoRa busy");
+      return;
+    }
   }
+  
+  debug(F("Sending: "));
+  debugln(msg);
 
   operationDone = false;
-
-  debug(F("Sending: "));
-  debugln(message);
-
-  transmitting = true;
   messageStartTime = millis();
-  int state = radio.startTransmit(message);
+  int state = radio.startTransmit(msg);
 
   if (state != RADIOLIB_ERR_NONE)
   {
@@ -378,11 +384,43 @@ void Rakieta::transmit(String message)
     operationDone = true;
     startListening();
   }
-  
-  if (millis() - messageStartTime >= RX_TIMEOUT)
+}
+
+void Rakieta::transmit(uint8_t *msg, size_t len)
+{
+  if (len > 255)
   {
-    debugln("ERROR: LoRa timeout, forcing radio reset");
-    radio.standby();
+    debugln(F("Error: Message too long"));
+    return;
+  }
+
+  if (!operationDone)
+  {
+    if (millis() - messageStartTime >= TX_TIMEOUT)
+    {
+      debugln("ERROR: LoRa timeout, forcing radio reset");
+      radio.standby();
+      delay(2);
+      startListening();
+    }
+    else
+    {
+      debugln("LoRa busy");
+      return;
+    }
+  }
+  
+  debug(F("Sending: "));
+  debugln(*msg);
+
+  operationDone = false;
+  messageStartTime = millis();
+  int state = radio.startTransmit(msg, len);
+
+  if (state != RADIOLIB_ERR_NONE)
+  {
+    debug(F("Transmit error: "));
+    debugln(state);
     operationDone = true;
     startListening();
   }
@@ -504,23 +542,10 @@ bool Rakieta::SDInit()
 {
   debugln("Initializing SD card...");
 
-  bool sdInit = false;
-  
-  #if defined(ARDUINO_ARCH_ESP32)  /// ESP32 - użyj SPI z domyślnymi pinami
-    if (!sd.begin()) {
-  #elif defined(ARDUINO_ARCH_STM32)  /// STM32 - często wymaga podania CS pinu
-    if (!sd.begin(SD_CS)) {
-  #else  /// Dla innych platform
-    if (!sd.begin(10)) {
-  #endif
-    
-    debugln("Card Mount Failed");
-    return false;
-  }
-  
-  if (!sdInit)
+  if (!sd.begin(SdSpiConfig(SD_CS, 2, SPI2_SPEED, &spi2)))  /// do kontroli
   {
-    debugln("SD card initialization failed!");
+    debugln("Card Mount Failed");
+    error |= SD_ERROR;
     sdReady = false;
     return false;
   }
@@ -581,15 +606,27 @@ bool Rakieta::SDWriteData(const String& data)
   return true;
 }
 
-bool Rakieta::writeRocketData()
+void Rakieta::writeRocketData()
 {
   String msg = prepareDataLineMsg();
   debugln(msg);
   
-  if ((!sdReady || !SDDataFile) && (!flashReady || !flashDataFile)) return false;
-  
-  flashWriteData(msg);
-  SDWriteData(msg);
+  if (flashReady)
+  {
+    if (!flashWriteData(msg))
+    {
+      error |= FLASH_FILE_ERROR;
+      debugln("Flash write failed!");
+    }
+  }
+  if (sdReady)
+  {
+    if (!SDWriteData(msg))
+    {
+      error |= SD_FILE_ERROR;
+      debugln("SD write failed!");
+    }
+  }
 }
 
 void Rakieta::watchdog()
@@ -599,8 +636,9 @@ void Rakieta::watchdog()
   if (error & LORA_ERROR)
   {
     uint8_t times = 0;
-    while (!initializeRadio() && times < 10;)
+    while (!initializeRadio() && times < 10)
     {
+      error |= LORA_ERROR;
       debugln(F("Radio initialization error!"));
       times++;
     }
@@ -608,6 +646,7 @@ void Rakieta::watchdog()
     if (times >= 10) { NVIC_SystemReset(); }
     else
     {
+      error &= ~LORA_ERROR;
       startListening();
       delay(10);
     }
@@ -615,7 +654,7 @@ void Rakieta::watchdog()
 
   if (error & LSM_ERROR)
   {
-    if (!lsm.begin_SPI(255, &SPI))
+    if (!lsm.begin_SPI(255, &spi3))
     {
       debugln("Cannot init lsm (LSM6DS3)");
       error |= LSM_ERROR;
@@ -633,7 +672,7 @@ void Rakieta::watchdog()
   
   if (error & BMP_ERROR)
   {
-    if (!bmp.begin_SPI(255, &SPI))
+    if (!bmp.begin_SPI(255, &spi4))
     {
       debugln("Cannot init bmp");
       error |= BMP_ERROR;
@@ -737,13 +776,13 @@ void Rakieta::prepareMsg()
   message.add(int8_t(data.lsm.temp), lsmTempPos, lsmTempLen, true);
   message.add(int16_t(data.lsm.lastTotalSpeed * 10), lsmSpeedPos, lsmSpeedLen, true);
   
-  message.add(int16_t(data.adxl.ax), adxlAccelXPos * 10, adxlAccelXLen, true);
-  message.add(int16_t(data.adxl.ay), adxlAccelYPos * 10, adxlAccelYLen, true);
-  message.add(int16_t(data.adxl.az), adxlAccelZPos * 10, adxlAccelZLen, true);
+  message.add(int16_t(data.adxl.ax * 10), adxlAccelXPos, adxlAccelXLen, true);
+  message.add(int16_t(data.adxl.ay * 10), adxlAccelYPos, adxlAccelYLen, true);
+  message.add(int16_t(data.adxl.az * 10), adxlAccelZPos, adxlAccelZLen, true);
   message.add(int16_t(data.adxl.lastTotalSpeed * 10), adxlSpeedPos, adxlSpeedLen, true);
 
   message.add(int8_t(data.bmp.temp), bmpTempPos, bmpTempLen, true);
-  message.add(uint16_t(data.bmp.pressure / 10), bmpPressPos, bmpPressLen);  /// sprawdzić czy jest w Pa czy w hPa
+  message.add(uint16_t(data.bmp.pressure * 10), bmpPressPos, bmpPressLen);
   message.add(uint16_t(data.bmp.altitude * 10), bmpAltiPos, bmpAltiLen);
   message.add(int16_t(data.bmp.lastVerticalSpeed * 10), bmpSpeedPos, bmpSpeedLen, true);
 
@@ -769,8 +808,8 @@ void Rakieta::sendMsg()
 
   debugln("\nEnd of the message.\n\n");
 
-  transmit(String(*txPacket));
-  messagePending = false;
+  transmit(txPacket, ARRAY_SIZE);
+
   ledState = !ledState;
   digitalWrite(LED_1, ledState);
 
@@ -919,7 +958,7 @@ void Rakieta::setOffsets()
 {
   debugln(F("Sensors calibration. Wait..."));
 
-  float validLsm = 0, validAdxl = 0, validBmp = 0, validMax = 0;
+  validLsm = 0, validAdxl = 0, validBmp = 0, validMax = 0, validGPS = 0;
 
   uint8_t num = 50;
   for (uint8_t i = 0; i < num; i++)
@@ -954,19 +993,18 @@ void Rakieta::setOffsets()
     delay(25);
   }
 
-  offsets.lsm.ax = (validLsm ? (offsets.lsm.ax / validLsm) : 0);
-  offsets.lsm.ay = (validLsm ? (offsets.lsm.ay / validLsm) : 0);
-  offsets.lsm.az = (validLsm ? (offsets.lsm.az / validLsm) : 0);
-  offsets.lsm.gx = (validLsm ? (offsets.lsm.gx / validLsm) : 0);
-  offsets.lsm.gy = (validLsm ? (offsets.lsm.gy / validLsm) : 0);
-  offsets.lsm.gz = (validLsm ? (offsets.lsm.gz / validLsm) : 0);
-  offsets.adxl.ax = (validAdxl ? (offsets.adxl.ax / validAdxl) : 0);
-  offsets.adxl.ay = (validAdxl ? (offsets.adxl.ay / validAdxl) : 0);
-  offsets.adxl.az = (validAdxl ? (offsets.adxl.az / validAdxl) : 0);
-  offsets.bmp.altitude = (validBmp ? (offsets.bmp.altitude / validBmp) : 0);
+  offsets.lsm.ax = (validLsm ? ((float)offsets.lsm.ax / (float)validLsm) : 0);
+  offsets.lsm.ay = (validLsm ? ((float)offsets.lsm.ay / (float)validLsm) : 0);
+  offsets.lsm.az = (validLsm ? ((float)offsets.lsm.az / (float)validLsm) : 0);
+  offsets.lsm.gx = (validLsm ? ((float)offsets.lsm.gx / (float)validLsm) : 0);
+  offsets.lsm.gy = (validLsm ? ((float)offsets.lsm.gy / (float)validLsm) : 0);
+  offsets.lsm.gz = (validLsm ? ((float)offsets.lsm.gz / (float)validLsm) : 0);
+  offsets.adxl.ax = (validAdxl ? ((float)offsets.adxl.ax / (float)validAdxl) : 0);
+  offsets.adxl.ay = (validAdxl ? ((float)offsets.adxl.ay / (float)validAdxl) : 0);
+  offsets.adxl.az = (validAdxl ? ((float)offsets.adxl.az / (float)validAdxl) : 0);
+  offsets.bmp.altitude = (validBmp ? ((float)offsets.bmp.altitude / (float)validBmp) : 0);
 
   num = 10;
-  uint8_t validGPS = 0;
   uint32_t timeout = millis() + 30000;
 
   while (validGPS < num || millis() < timeout)
@@ -984,11 +1022,11 @@ void Rakieta::setOffsets()
   }
 
   /// czy odejmować tylko całości czy całkowitą wartość (teraz są całości)
-  offsets.gps.lat = int32_t(validGPS ? (offsets.gps.lat / validGPS) : 0);
-  offsets.gps.lng = int32_t(validGPS ? (offsets.gps.lng / validGPS) : 0);
-  offsets.gps.altiM = (validGPS ? (offsets.gps.altiM / validGPS) : 0);
-  offsets.gps.altiF = (validGPS ? (offsets.gps.altiF / validGPS) : 0);
-  offsets.gps.speed = (validGPS ? (offsets.gps.speed / validGPS) : 0);
+  offsets.gps.lat = int32_t(validGPS ? ((float)offsets.gps.lat / (float)validGPS) : 0);
+  offsets.gps.lng = int32_t(validGPS ? ((float)offsets.gps.lng / (float)validGPS) : 0);
+  offsets.gps.altiM = (validGPS ? ((float)offsets.gps.altiM / (float)validGPS) : 0);
+  offsets.gps.altiF = (validGPS ? ((float)offsets.gps.altiF / (float)validGPS) : 0);
+  offsets.gps.speed = (validGPS ? ((float)offsets.gps.speed / (float)validGPS) : 0);
 
   String msg = prepareOffsetsMsg();
 
@@ -1388,10 +1426,7 @@ void Rakieta::emergencyStop()
     emergency = true;
   }
 
-  float totalAccel = data.adxl.ax * data.adxl.ax + 
-                     data.adxl.ay * data.adxl.ay + 
-                     data.adxl.az * data.adxl.az;
-  if (totalAccel > 10000.0f)  // >100g emergency!
+  if (data.adxl.lastTotalAccel > 100.0f)  // >100g emergency!
   {
     log += String(millis()) + "EMERGENCY: Crash/explosion detected! ";
     emergency = true;
@@ -1418,3 +1453,5 @@ void Rakieta::setFlightMode(bool flight)
   debug("Flight mode: ");
   debugln(inFlight ? "ACTIVE (no watchdog)" : "INACTIVE");
 }
+
+
