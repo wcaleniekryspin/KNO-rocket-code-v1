@@ -1,51 +1,5 @@
 #include "Rakieta.h"
 
-/***************************************************
-chyba DONE:
- - reakcja na komendy
- - działanie funkcji parashuteOpen()
- - dodać zmianę parametrów (buzzer, msgDelay i inne) w funkcji updateStatus()
-
- -- dodać opcję wyłączenia zbierania danych handleSensors = true/false
- -- dodać mnożniki do wartości w funkcji prepareMsg()
- - zmiana softwareserial gps na hardwareserial
-    W Rakieta.h: HardwareSerial gpsSerial(PA10, PA9);
-    W setup(): gpsSerial.begin(9600);
- -- dodać timeout w funkcji transmit(String)
-    while (!operationDone && (millis() - messageStartTime >= TX_TIMEOUT))
- -- dodać funkcję zapisu do pliku czasów xStartTime po touchdown
- - do zmiany większość STATUS UPGRADE CONST w pliku config.h !!!
- -- dodać funkcję emergencyStop() (odcina tlen i wyrzuca spadochron)
-
- -- zastanowić się czy wychodzić z funkcji handleSensor() jeśli jest błąd na sensorze (NIE)
- -- zastanowić się czy robić reset jeśli LoRa nie działa (TAK bo tylko w inFlight == false)
-
-TO DO:
- -- dodanie trybu oszczędzania energii
-    #include <STM32LowPower.h>
-    void enterSleepMode() {
-      if (!inFlight) {
-        lsm.end();
-        bmp.end();
-        // ...
-
-        LowPower.enableWakeupFrom(GPIOA, PA0, RISING);  // coś innego
-        LowPower.sleep();
-
-        spi1.begin();
-        // ...
-      }
-    }
-
- --- czy chcemy dodać czujnik ciśnienia do komory spalania??
-     kod do odczytu ciśnienia
-     kod PID do sterowania serwem
-
- ---- dodać hardware watchdog w trybach debug/idle/ready (może przez flagę bool inFlight)
- ---- teraz jest jedna termopara trzeba dodać więcej (na przyszłość)
- ---- Dodać listę wiadomości do buforowania (bardzo mało ważne raczej, jak znikną dane w transmisji to trudno)
-
-***************************************************/
 
 Rakieta::Rakieta():
   status(State::debug),
@@ -1453,5 +1407,3 @@ void Rakieta::setFlightMode(bool flight)
   debug("Flight mode: ");
   debugln(inFlight ? "ACTIVE (no watchdog)" : "INACTIVE");
 }
-
-
